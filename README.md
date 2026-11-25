@@ -18,5 +18,6 @@ without them it only checks that the app compiles.
 
 ## Firmware updates from the app
 
-The app's Update tab installs the file `pager-firmware.bin` from this repository's latest
-GitHub release. Publish a release with that file attached to make an update available.
+The app's Update tab installs `firmware/release/pager-firmware.bin` from the `main` branch and
+reads the version from `firmware/release/version.txt`. Commit a new build and version there to
+make an update available.

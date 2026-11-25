@@ -9,8 +9,9 @@ struct UpdateView: View {
     @State private var message = ""
     @State private var importing = false
 
-    private static let releaseInfo = URL(string: "https://api.github.com/repos/jarredksmith/inkfob/releases/latest")!
-    private static let releaseFile = URL(string: "https://github.com/jarredksmith/inkfob/releases/latest/download/pager-firmware.bin")!
+    // The published firmware lives in the repository itself, under firmware/release.
+    private static let releaseInfo = URL(string: "https://raw.githubusercontent.com/jarredksmith/inkfob/main/firmware/release/version.txt")!
+    private static let releaseFile = URL(string: "https://raw.githubusercontent.com/jarredksmith/inkfob/main/firmware/release/pager-firmware.bin")!
 
     var body: some View {
         NavigationStack {
@@ -54,20 +55,24 @@ struct UpdateView: View {
     }
 
     private func checkLatest() async {
-        guard let (data, _) = try? await URLSession.shared.data(from: Self.releaseInfo),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let tag = json["tag_name"] as? String else {
+        var request = URLRequest(url: Self.releaseInfo)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200 else {
             latest = "None published yet"
             return
         }
-        latest = tag
+        let tag = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        latest = tag.isEmpty || tag.count > 20 ? "None published yet" : tag
     }
 
     private func installLatest() {
         busy = true
         message = ""
         Task {
-            let result = try? await URLSession.shared.data(from: Self.releaseFile)
+            var request = URLRequest(url: Self.releaseFile)
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+            let result = try? await URLSession.shared.data(for: request)
             await MainActor.run {
                 busy = false
                 if let image = result?.0, image.count > 200_000 {
