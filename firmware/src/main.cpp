@@ -102,7 +102,7 @@ struct PendingFetch {
   bool preexisting;  // was already on the phone before the pager connected
 };
 
-static const char* const FIRMWARE_VERSION = "v1.9";
+static const char* const FIRMWARE_VERSION = "v2.0";
 
 // One write to the phone's control point, carried out by the Bluetooth task.
 struct BleRequest {
@@ -271,6 +271,10 @@ static const size_t PHOTO_BYTES = ((EPD_WIDTH + 7) / 8) * EPD_HEIGHT;
 static uint8_t g_photo[PHOTO_BYTES];
 static bool g_photoTried = false;
 static bool g_photoOk = false;
+// Two-button control, for a pager whose wheel is stiff, buried or broken:
+// tap EXIT = up, tap MENU = down, double-tap either (or press both) = select,
+// hold EXIT = back, hold MENU = menu. The wheel is ignored while this is on.
+static volatile bool g_twoButton = false;
 static volatile bool g_repeatOk = false;   // holding the wheel up or down repeats
 static volatile bool g_rendering = false;
 static volatile uint32_t g_pressAtMs = 0;  // when the button being handled went down
@@ -803,6 +807,7 @@ static String settingsText() {
   s += "face=" + String((int)g_sleepFace) + "\n";
   s += "home=" + String((int)g_face) + "\n";
   s += "popup=" + String((int)g_popupChoice) + "\n";
+  s += "btn2=" + String(g_twoButton ? 1 : 0) + "\n";
   s += "corners=";
   for (int i = 0; i < 4; i++) s += String((int)g_corners[i]);
   s += "\n";
@@ -2204,7 +2209,7 @@ static void drawDetail() {
   }
 }
 
-static const int SETTINGS_COUNT = 12;
+static const int SETTINGS_COUNT = 13;
 
 static String minutesLabel(int minutes) {
   if (minutes >= 60) return String(minutes / 60) + (minutes == 60 ? " hour" : " hours");
@@ -2233,8 +2238,9 @@ static String settingsLabel(int i) {
       if (!seconds) return String("Alerts stay: until dismissed");
       return String("Alerts stay: ") + (seconds < 60 ? String(seconds) + " sec" : minutesLabel(seconds / 60));
     }
-    case 9: return "Status";
-    case 10: return "Clear list";
+    case 9: return String("Controls: ") + (g_twoButton ? "Two buttons" : "Wheel");
+    case 10: return "Status";
+    case 11: return "Clear list";
     default: return "Forget phone";
   }
 }
@@ -2566,6 +2572,9 @@ static void applyAppSetting(const String& pair) {
     g_prefs.putUChar("homeFace", g_face);
     g_photoTried = false;
     g_forceFull = true;
+  } else if (key == "btn2") {
+    g_twoButton = number != 0;
+    g_prefs.putBool("twoButton", g_twoButton);
   } else if (key == "popup" && number >= 0 && number < POPUP_CHOICES) {
     g_popupChoice = (uint8_t)number;
     g_prefs.putUChar("popupSel", g_popupChoice);
@@ -3885,6 +3894,14 @@ static void inputTask(void*) {
   uint32_t heldBackUntil = 0;
   uint32_t ignoreRockerUntil = 0;
   uint32_t repeatAt = 0;
+  uint32_t downAt[2] = {0, 0};   // two-button mode: [0] EXIT, [1] MENU
+  bool used[2] = {true, true};
+  int tapPin = -1;
+  uint32_t tapAt = 0;
+  auto emit = [](int pin, uint32_t at) {
+    g_pressAtMs = at;
+    xQueueSend(g_buttonQueue, &pin, 0);
+  };
 
   for (;;) {
     uint32_t now = millis();
@@ -3896,6 +3913,28 @@ static void inputTask(void*) {
         since[i] = now;
       } else if (raw != stable[i] && now - since[i] >= 20) {
         stable[i] = raw;
+        if (g_twoButton) {
+          if (pin != PIN_EXIT && pin != PIN_MENU) continue;   // the wheel is switched off
+          int b = (pin == PIN_EXIT) ? 0 : 1;
+          if (raw) {
+            downAt[b] = now;
+            used[b] = false;
+            if (stable[3] && stable[4]) {                     // both together = select
+              used[0] = used[1] = true;
+              tapPin = -1;
+              emit(PIN_CLICK, now);
+            }
+          } else if (!used[b]) {
+            if (tapPin >= 0 && now - tapAt < 380) {            // second tap in time = select
+              tapPin = -1;
+              emit(PIN_CLICK, now);
+            } else {
+              tapPin = pin;
+              tapAt = now;
+            }
+          }
+          continue;
+        }
         if (!raw) continue;
         if (pin == PIN_CLICK) {
           // Pressing the rocker straight down often brushes up or down too.
@@ -3913,6 +3952,22 @@ static void inputTask(void*) {
           xQueueSend(g_buttonQueue, &pin, 0);
         }
       }
+    }
+    if (g_twoButton) {
+      heldBackPin = -1;
+      for (int b = 0; b < 2; b++) {                           // a hold = the button's own job
+        if (stable[3 + b] && !used[b] && now - downAt[b] > 550) {
+          used[b] = true;
+          tapPin = -1;
+          emit(b == 0 ? PIN_EXIT : PIN_MENU, now);
+        }
+      }
+      if (tapPin >= 0 && now - tapAt >= 380) {                // a lone tap = up or down
+        emit(tapPin == PIN_EXIT ? PIN_UP : PIN_DOWN, now);
+        tapPin = -1;
+      }
+      vTaskDelay(pdMS_TO_TICKS(5));
+      continue;
     }
     // Holding the wheel up or down keeps moving through a list, one row per redraw.
     for (int i = 0; i < 2; i++) {
@@ -3985,9 +4040,13 @@ static void onSettingsSelect() {
       g_prefs.putUChar("popupSel", g_popupChoice);
       break;
     case 9:
-      g_screen = SCREEN_STATUS;
+      g_twoButton = !g_twoButton;
+      g_prefs.putBool("twoButton", g_twoButton);
       break;
     case 10:
+      g_screen = SCREEN_STATUS;
+      break;
+    case 11:
       g_notes.clear();
       g_sel = 0;
       g_listTop = 0;
@@ -4516,6 +4575,7 @@ void setup() {
   if (g_sleepChoice >= SLEEP_CHOICES) g_sleepChoice = 0;
   if (g_checkChoice >= CHECK_CHOICES) g_checkChoice = 2;
   g_sleepFace = g_prefs.getUChar("sleepFace", 0) ? 1 : 0;
+  g_twoButton = g_prefs.getBool("twoButton", false);
   g_popupChoice = g_prefs.getUChar("popupSel", 2);
   if (g_popupChoice >= POPUP_CHOICES) g_popupChoice = 2;
   g_tally = g_prefs.getInt("tally", 0);

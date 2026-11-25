@@ -22,6 +22,19 @@ struct PagerSettingsView: View {
                     Toggle("Flip screen", isOn: flag("flip"))
                     Toggle("Fast refresh", isOn: flag("fast"))
                 }
+                if link.settings["btn2"] != nil {
+                    Section {
+                        Toggle("Use the two buttons only", isOn: flag("btn2"))
+                    } header: {
+                        Text("Controls")
+                    } footer: {
+                        Text("For a wheel that is stuck or hard to reach. Tap EXIT to go up and MENU to go down. Double-tap either button, or press both together, to select. Hold EXIT to go back, hold MENU for the menu. The wheel is ignored while this is on.")
+                    }
+                } else if link.isReady {
+                    Section("Controls") {
+                        Text("Two-button controls need pager firmware v2.0. Install it from the Update tab, then come back here.").font(.callout)
+                    }
+                }
                 if link.settings["popup"] != nil {
                     Section {
                         Picker("Stay on screen", selection: choice("popup")) {
