@@ -28,7 +28,7 @@ struct PagerSettingsView: View {
                     } header: {
                         Text("Controls")
                     } footer: {
-                        Text("For a wheel that is stuck or hard to reach. Tap EXIT to go up and MENU to go down. Double-tap either button, or press both together, to select. Hold EXIT to go back, hold MENU for the menu. The wheel is ignored while this is on.")
+                        Text("For a wheel that is stuck or hard to reach. Tap the top button (MENU) to go up and the bottom button (EXIT) to go down. Double-tap either button, or press both together, to select. Hold the bottom button to go back, hold the top button for the menu. The wheel is ignored while this is on.")
                     }
                 } else if link.isReady {
                     Section("Controls") {

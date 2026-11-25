@@ -102,7 +102,7 @@ struct PendingFetch {
   bool preexisting;  // was already on the phone before the pager connected
 };
 
-static const char* const FIRMWARE_VERSION = "v2.0";
+static const char* const FIRMWARE_VERSION = "v2.1";
 
 // One write to the phone's control point, carried out by the Bluetooth task.
 struct BleRequest {
@@ -272,7 +272,7 @@ static uint8_t g_photo[PHOTO_BYTES];
 static bool g_photoTried = false;
 static bool g_photoOk = false;
 // Two-button control, for a pager whose wheel is stiff, buried or broken:
-// tap EXIT = up, tap MENU = down, double-tap either (or press both) = select,
+// tap MENU (the top button) = up, tap EXIT (the bottom one) = down, double-tap either (or press both) = select,
 // hold EXIT = back, hold MENU = menu. The wheel is ignored while this is on.
 static volatile bool g_twoButton = false;
 static volatile bool g_repeatOk = false;   // holding the wheel up or down repeats
@@ -3963,7 +3963,7 @@ static void inputTask(void*) {
         }
       }
       if (tapPin >= 0 && now - tapAt >= 380) {                // a lone tap = up or down
-        emit(tapPin == PIN_EXIT ? PIN_UP : PIN_DOWN, now);
+        emit(tapPin == PIN_EXIT ? PIN_DOWN : PIN_UP, now);
         tapPin = -1;
       }
       vTaskDelay(pdMS_TO_TICKS(5));
