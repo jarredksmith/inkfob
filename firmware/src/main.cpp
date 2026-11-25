@@ -102,7 +102,7 @@ struct PendingFetch {
   bool preexisting;  // was already on the phone before the pager connected
 };
 
-static const char* const FIRMWARE_VERSION = "v1.7";
+static const char* const FIRMWARE_VERSION = "v1.8";
 
 // One write to the phone's control point, carried out by the Bluetooth task.
 struct BleRequest {
@@ -294,6 +294,13 @@ static const uint16_t SLEEP_MINUTES[] = {0, 1, 5, 15, 30, 60};  // 0 = never
 static const int SLEEP_CHOICES = 6;
 static const uint16_t CHECK_MINUTES[] = {0, 5, 15, 30, 60};     // 0 = do not check
 static const int CHECK_CHOICES = 5;
+// How long a notification that pops up by itself stays before the screen goes back.
+static const uint16_t POPUP_SECONDS[] = {0, 10, 30, 60, 300};  // 0 = until dismissed
+static const int POPUP_CHOICES = 5;
+static uint8_t g_popupChoice = 2;
+static bool g_popupActive = false;   // the notification on screen opened by itself
+static uint32_t g_popupAtMs = 0;
+static uint32_t g_popupUid = 0;
 static uint8_t g_sleepChoice = 0;
 static uint8_t g_checkChoice = 2;
 static uint32_t g_lastActivityMs = 0;  // last button press or incoming notification
@@ -627,6 +634,9 @@ static void storeNote(const PendingFetch& f, const String& appId, const String& 
   if (f.announce && g_quiet) wakeScreen();
   if (f.announce && g_screen != SCREEN_SETTINGS) {
     openDetail(0);
+    g_popupActive = true;
+    g_popupAtMs = millis();
+    g_popupUid = g_detailUid;
     blinkLed(3);
     markDirty(0);
   } else {
@@ -792,6 +802,7 @@ static String settingsText() {
   s += "check=" + String((int)g_checkChoice) + "\n";
   s += "face=" + String((int)g_sleepFace) + "\n";
   s += "home=" + String((int)g_face) + "\n";
+  s += "popup=" + String((int)g_popupChoice) + "\n";
   s += "corners=";
   for (int i = 0; i < 4; i++) s += String((int)g_corners[i]);
   s += "\n";
@@ -2164,7 +2175,7 @@ static void drawDetail() {
   }
 }
 
-static const int SETTINGS_COUNT = 11;
+static const int SETTINGS_COUNT = 12;
 
 static String minutesLabel(int minutes) {
   if (minutes >= 60) return String(minutes / 60) + (minutes == 60 ? " hour" : " hours");
@@ -2188,8 +2199,13 @@ static String settingsLabel(int i) {
     }
     case 6: return String("Sleep screen: ") + (g_sleepFace ? "My card" : "Status");
     case 7: return String("Home face: ") + FACE_NAMES[g_face];
-    case 8: return "Status";
-    case 9: return "Clear list";
+    case 8: {
+      int seconds = POPUP_SECONDS[g_popupChoice];
+      if (!seconds) return String("Alerts stay: until dismissed");
+      return String("Alerts stay: ") + (seconds < 60 ? String(seconds) + " sec" : minutesLabel(seconds / 60));
+    }
+    case 9: return "Status";
+    case 10: return "Clear list";
     default: return "Forget phone";
   }
 }
@@ -2521,6 +2537,9 @@ static void applyAppSetting(const String& pair) {
     g_prefs.putUChar("homeFace", g_face);
     g_photoTried = false;
     g_forceFull = true;
+  } else if (key == "popup" && number >= 0 && number < POPUP_CHOICES) {
+    g_popupChoice = (uint8_t)number;
+    g_prefs.putUChar("popupSel", g_popupChoice);
   } else if (key == "corners" && value.length() == 4) {
     for (int i = 0; i < 4; i++) g_corners[i] = (uint8_t)constrain(value[i] - '0', 0, 9);
     g_prefs.putString("corners", value);
@@ -3922,9 +3941,13 @@ static void onSettingsSelect() {
       g_prefs.putUChar("homeFace", g_face);
       break;
     case 8:
-      g_screen = SCREEN_STATUS;
+      g_popupChoice = (g_popupChoice + 1) % POPUP_CHOICES;
+      g_prefs.putUChar("popupSel", g_popupChoice);
       break;
     case 9:
+      g_screen = SCREEN_STATUS;
+      break;
+    case 10:
       g_notes.clear();
       g_sel = 0;
       g_listTop = 0;
@@ -4197,6 +4220,7 @@ static void serviceButtons() {
   int pin;
   while (xQueueReceive(g_buttonQueue, &pin, 0) == pdTRUE) {
     g_lastActivityMs = millis();
+    g_popupActive = false;  // touched: the notification stays until closed by hand
     if (g_quiet) {
       wakeScreen();  // the press only wakes the screen
       continue;
@@ -4362,6 +4386,23 @@ static void enterSleep(bool drawFace) {
 }
 
 // Sleeps once nothing has happened for the chosen time.
+// Puts the screen back where it was when a pop-up notification has been left alone.
+static void servicePopup() {
+  if (!g_popupActive) return;
+  if (g_screen != SCREEN_DETAIL || g_detailUid != g_popupUid) {
+    g_popupActive = false;
+    return;
+  }
+  int seconds = POPUP_SECONDS[g_popupChoice];
+  if (!seconds || millis() - g_popupAtMs < (uint32_t)seconds * 1000UL) return;
+  g_popupActive = false;
+  int idx = findNote(g_popupUid);
+  if (idx >= 0) g_notes[idx].unread = true;   // nobody pressed anything, so it still counts as new
+  g_screen = g_detailReturn;
+  g_forceFull = true;
+  markDirty(0);
+}
+
 static void serviceIdle() {
   int minutes = SLEEP_MINUTES[g_sleepChoice];
   if (minutes == 0) return;
@@ -4435,6 +4476,8 @@ void setup() {
   if (g_sleepChoice >= SLEEP_CHOICES) g_sleepChoice = 0;
   if (g_checkChoice >= CHECK_CHOICES) g_checkChoice = 2;
   g_sleepFace = g_prefs.getUChar("sleepFace", 0) ? 1 : 0;
+  g_popupChoice = g_prefs.getUChar("popupSel", 2);
+  if (g_popupChoice >= POPUP_CHOICES) g_popupChoice = 2;
   g_tally = g_prefs.getInt("tally", 0);
   {
     String corners = g_prefs.getString("corners", "1236");
@@ -4518,6 +4561,7 @@ void loop() {
                             g_screen == SCREEN_CONVERT || g_screen == SCREEN_HANGMAN ||
                             g_screen == SCREEN_MINES || g_screen == SCREEN_MORSE);
   serviceTools();
+  servicePopup();
   serviceIdle();
   if (g_dirty && (int32_t)(millis() - g_dirtyAtMs) >= 0) {
     // While a batch of notifications is still loading, wait so the screen is

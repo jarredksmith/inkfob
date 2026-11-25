@@ -8,6 +8,7 @@ struct PagerSettingsView: View {
     @State private var qr = ""
 
     private static let sleepChoices = ["Never", "1 minute", "5 minutes", "15 minutes", "30 minutes", "1 hour"]
+    private static let popupChoices = ["Until I dismiss it", "10 seconds", "30 seconds", "1 minute", "5 minutes"]
     private static let checkChoices = ["Off", "Every 5 minutes", "Every 15 minutes", "Every 30 minutes", "Every hour"]
 
     var body: some View {
@@ -20,6 +21,17 @@ struct PagerSettingsView: View {
                     Toggle("Small text", isOn: flag("small"))
                     Toggle("Flip screen", isOn: flag("flip"))
                     Toggle("Fast refresh", isOn: flag("fast"))
+                }
+                if link.settings["popup"] != nil {
+                    Section {
+                        Picker("Stay on screen", selection: choice("popup")) {
+                            ForEach(Array(Self.popupChoices.enumerated()), id: \.offset) { index, label in Text(label).tag(index) }
+                        }
+                    } header: {
+                        Text("Notifications")
+                    } footer: {
+                        Text("When a notification pops up on the pager and you leave it alone, the screen goes back to what it was showing. The notification stays in the list as new. Pressing any button keeps it open.")
+                    }
                 }
                 Section {
                     Picker("Sleep after", selection: choice("sleep")) {
