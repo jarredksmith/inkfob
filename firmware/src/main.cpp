@@ -102,7 +102,7 @@ struct PendingFetch {
   bool preexisting;  // was already on the phone before the pager connected
 };
 
-static const char* const FIRMWARE_VERSION = "v1.8";
+static const char* const FIRMWARE_VERSION = "v1.9";
 
 // One write to the phone's control point, carried out by the Bluetooth task.
 struct BleRequest {
@@ -1582,11 +1582,40 @@ static void drawLinkHelp() {
   }
 }
 
-static void drawSmallCentered(const String& text, int top) {
+// One small centred line. The screen holds 40 of these characters, so a longer
+// line first loses its wide gaps and, if that is not enough, wraps onto a second line.
+static void drawSmallCentered(const String& original, int top) {
+  const int MAX_CHARS = 40;
   g_canvas.setFont(nullptr);
   g_canvas.setTextSize(1);
-  g_canvas.setCursor((EPD_WIDTH - (int)text.length() * 6) / 2, top);
-  g_canvas.print(text);
+  String text = original;
+  while ((int)text.length() > MAX_CHARS && text.indexOf("   ") >= 0) text.replace("   ", "  ");
+  if ((int)text.length() <= MAX_CHARS) {
+    g_canvas.setCursor((EPD_WIDTH - (int)text.length() * 6) / 2, top);
+    g_canvas.print(text);
+    return;
+  }
+  // break at the space nearest the middle, preferring a wide gap between two hints
+  int mid = text.length() / 2, cut = -1, best = 1000;
+  for (int i = 1; i < (int)text.length() - 1; i++) {
+    if (text[i] != ' ') continue;
+    bool wide = text[i + 1] == ' ' || text[i - 1] == ' ';
+    int score = abs(i - mid) - (wide ? 8 : 0);
+    if (score < best) {
+      best = score;
+      cut = i;
+    }
+  }
+  String first = cut > 0 ? text.substring(0, cut) : text.substring(0, MAX_CHARS);
+  String second = cut > 0 ? text.substring(cut) : text.substring(MAX_CHARS);
+  first.trim();
+  second.trim();
+  if ((int)first.length() > MAX_CHARS) first = first.substring(0, MAX_CHARS);
+  if ((int)second.length() > MAX_CHARS) second = second.substring(0, MAX_CHARS);
+  g_canvas.setCursor((EPD_WIDTH - (int)first.length() * 6) / 2, top);
+  g_canvas.print(first);
+  g_canvas.setCursor((EPD_WIDTH - (int)second.length() * 6) / 2, top + 10);
+  g_canvas.print(second);
 }
 
 static bool photoReady();
@@ -1871,7 +1900,7 @@ static void drawToday() {
   }
   if (rows.empty()) {
     drawSmallCentered("Nothing from the phone yet.", 50);
-    drawSmallCentered("Open the Inkfob app to send today's lines.", 64);
+    drawSmallCentered("Open the Inkfob app to send them.", 64);
     return;
   }
   for (int i = 0; i < (int)rows.size() && i < 10; i++) {
@@ -2780,13 +2809,22 @@ static uint32_t stopwatchMs() {
 static void drawBig(const String& text, int baseline) {
   g_canvas.setTextColor(1);
   g_canvas.setFont(&FreeSansBold24pt7b);
+  if (textWidth(text) > EPD_WIDTH - 8) {
+    // too wide for the big type: the next size down, doubled, is about two thirds as wide
+    g_canvas.setFont(&FreeSansBold9pt7b);
+    g_canvas.setTextSize(2);
+    if (textWidth(text) > EPD_WIDTH - 8) g_canvas.setTextSize(1);
+    drawCentered(text, baseline - 6);
+    g_canvas.setTextSize(1);
+    return;
+  }
   drawCentered(text, baseline);
 }
 
 static void drawMedium(const String& text, int baseline) {
   g_canvas.setTextColor(1);
   g_canvas.setFont(&FreeSansBold9pt7b);
-  drawCentered(text, baseline);
+  drawCentered(fitText(text, EPD_WIDTH - 8), baseline);
 }
 
 static void drawHint(const String& text, int top) {
@@ -2851,13 +2889,13 @@ static void drawPomo() {
   drawMedium(g_pomoPhase == 1 ? "Focus" : "Break", 34);
   int left = pomoRemaining();
   drawBig(left >= 60 ? String((left + 59) / 60) + " min" : String(left) + " sec", 78);
-  drawHint(g_pomoRunning ? "Press: pause     MENU: reset" : "Paused.  Press: go on     MENU: reset", 96);
+  drawHint(g_pomoRunning ? "Press: pause     MENU: reset" : "Paused.  Press: go on    MENU: reset", 96);
 }
 
 static void drawTally() {
   drawHeader("TALLY", "EXIT = back");
   drawBig(String(g_tally), 70);
-  drawHint("Press or up: +1     Down: -1     MENU: zero", 96);
+  drawHint("Press or up: +1    Down: -1    MENU: zero", 96);
 }
 
 static String money(float amount) {
@@ -2916,7 +2954,8 @@ static void drawConvert() {
   snprintf(text, sizeof(text), fabsf(out) >= 100 ? "%.1f" : "%.2f", out);
   drawMedium(String(g_convValue) + " " + (g_convReverse ? pair.to : pair.from) + "  =", 40);
   drawBig(String(text) + " " + (g_convReverse ? pair.from : pair.to), 82);
-  drawHint("Wheel: number   Press: next unit   MENU: swap", 100);
+  drawHint("Wheel: number   Press: next unit", 96);
+  drawHint("MENU: swap direction", 107);
 }
 
 static void drawFind() {
@@ -2926,7 +2965,7 @@ static void drawFind() {
     drawHint("and your phone will ring", 70);
   } else if (!g_appListening) {
     drawMedium("The app is not connected", 54);
-    drawHint("Open Inkfob on the phone once, then try again", 70);
+    drawHint("Open Inkfob on the phone, then try again", 70);
   } else {
     drawMedium("Ringing your phone", 54);
     drawHint("Press again to ring once more", 70);
@@ -2951,7 +2990,7 @@ static void drawMorse() {
   } else {
     drawMedium("?", 78);
   }
-  drawHint(g_morseQuiz ? "Press: show, then next     MENU: chart" : "Wheel: browse     MENU: quiz me", 104);
+  drawHint(g_morseQuiz ? "Press: show / next    MENU: chart" : "Wheel: browse    MENU: quiz me", 104);
 }
 
 static void hangStart() {
@@ -3150,8 +3189,9 @@ static void drawSnake() {
   g_canvas.setTextColor(1);
   if (g_snLen == 0) {
     drawMedium("Snake", 46);
-    drawHint("Wheel up: turn left     Wheel down: turn right", 62);
-    drawHint("Press the wheel to start or pause", 78);
+    drawHint("Wheel up: turn left", 60);
+    drawHint("Wheel down: turn right", 70);
+    drawHint("Press the wheel to start or pause", 86);
     return;
   }
   const int ox = 1, oy = HEADER_H + 2;
