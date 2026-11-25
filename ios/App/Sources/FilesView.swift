@@ -8,7 +8,7 @@ struct FilesView: View {
     @State private var message = ""
 
     /// The photo face is stored as a file too, but it is not something to read.
-    private var shownFiles: [PagerFile] { link.files.filter { !$0.name.hasSuffix(".img") } }
+    private var shownFiles: [PagerLink.PagerFile] { link.files.filter { !$0.name.hasSuffix(".img") } }
 
     var body: some View {
         NavigationStack {
