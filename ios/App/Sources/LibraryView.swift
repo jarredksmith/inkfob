@@ -15,8 +15,21 @@ struct LibraryView: View {
         let id: Int
         let title: String
         let byline: String
-        /// The plain-text file on Project Gutenberg's servers.
-        var textAddress: String { "https://www.gutenberg.org/cache/epub/\(id)/pg\(id).txt" }
+        /// Where the plain-text file can be found, most reliable first. Project Gutenberg's own site
+        /// can be down for days at a time, so mirrors that carry the same files come first.
+        /// Mirrors file a book under its digits: book 1661 lives in 1/6/6/1661/.
+        var textAddresses: [String] {
+            let digits = Array(String(id))
+            let folder = (digits.count > 1 ? digits.dropLast().map(String.init).joined(separator: "/") : "0") + "/\(id)/"
+            let mirrors = ["https://www.mirrorservice.org/sites/ftp.ibiblio.org/pub/docs/books/gutenberg/",
+                           "https://mirror.csclub.uwaterloo.ca/gutenberg/"]
+            var list: [String] = []
+            for mirror in mirrors {
+                for name in ["\(id)-0.txt", "\(id).txt", "\(id)-8.txt"] { list.append(mirror + folder + name) }
+            }
+            list.append("https://www.gutenberg.org/cache/epub/\(id)/pg\(id).txt")
+            return list
+        }
     }
 
     static let popular: [Book] = [
@@ -117,7 +130,7 @@ struct LibraryView: View {
                 books = list
                 searching = false
                 message = list.isEmpty
-                    ? "No results. The book search may be down; the popular list below still works."
+                    ? "No results. Project Gutenberg's search may be down; the popular list below still works."
                     : "\(list.count) books found"
             }
         }
@@ -162,15 +175,25 @@ struct LibraryView: View {
     }
 
     private func fetch(_ book: Book) {
-        guard let url = URL(string: book.textAddress) else { return }
         working = book.id
         message = "Getting \(book.title)..."
         Task {
-            guard let data = await Self.load(url, timeout: 30) else {
-                await MainActor.run { message = "Could not download that book. Check the connection and try again."; working = nil }
+            var raw: String?
+            for address in book.textAddresses {
+                guard let url = URL(string: address), let data = await Self.load(url, timeout: 20), data.count > 2000 else { continue }
+                // files ending -8.txt are in the older Latin-1 encoding
+                raw = address.hasSuffix("-8.txt") ? String(data: data, encoding: .isoLatin1)
+                                                  : (String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1))
+                if raw != nil { break }
+            }
+            guard let text = raw else {
+                await MainActor.run {
+                    message = "Could not download that book from Project Gutenberg or its mirrors. Try again in a minute."
+                    working = nil
+                }
                 return
             }
-            let cleaned = PagerLink.plain(Self.tidy(String(decoding: data, as: UTF8.self)), limit: nil)
+            let cleaned = PagerLink.plain(Self.tidy(text), limit: nil)
             await MainActor.run {
                 working = nil
                 var text = cleaned
