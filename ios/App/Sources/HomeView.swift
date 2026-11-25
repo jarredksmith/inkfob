@@ -23,6 +23,7 @@ struct HomeView: View {
                     Toggle("Weather", isOn: $feeds.showWeather)
                     Toggle("Next calendar events", isOn: $feeds.showCalendar)
                     Toggle("Celsius", isOn: $feeds.useCelsius)
+                    Toggle("Steps today", isOn: $feeds.showSteps)
                     Button("Send now") { hub.pushHomeLines() }
                         .disabled(!link.isReady)
                     if let at = link.lastSentAt {
@@ -46,6 +47,7 @@ struct HomeView: View {
             .onChange(of: feeds.showWeather) { _, _ in hub.pushHomeLines() }
             .onChange(of: feeds.showCalendar) { _, _ in hub.pushHomeLines() }
             .onChange(of: feeds.useCelsius) { _, _ in hub.pushHomeLines() }
+            .onChange(of: feeds.showSteps) { _, _ in hub.pushHomeLines() }
         }
     }
 

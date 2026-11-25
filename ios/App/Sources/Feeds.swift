@@ -1,4 +1,5 @@
 import CoreLocation
+import CoreMotion
 import EventKit
 import Foundation
 
@@ -15,11 +16,16 @@ final class Feeds: NSObject, ObservableObject, CLLocationManagerDelegate {
     @Published var useCelsius: Bool = UserDefaults.standard.bool(forKey: "useCelsius") {
         didSet { UserDefaults.standard.set(useCelsius, forKey: "useCelsius") }
     }
+    @Published var showSteps: Bool = UserDefaults.standard.bool(forKey: "showSteps") {
+        didSet { UserDefaults.standard.set(showSteps, forKey: "showSteps") }
+    }
+    @Published var stepsLine: String = ""
     @Published var calendarAllowed = false
     @Published var locationAllowed = false
 
     private let locator = CLLocationManager()
     private let store = EKEventStore()
+    private let pedometer = CMPedometer()
 
     override init() {
         super.init()
@@ -59,26 +65,45 @@ final class Feeds: NSObject, ObservableObject, CLLocationManagerDelegate {
         if locationAllowed { locator.requestLocation() }
     }
 
-    /// Gathers everything and returns the lines to send, weather first.
+    /// Today's step count from the phone's motion sensor, or nil when it is unavailable or not allowed.
+    private func stepsToday() async -> String? {
+        guard CMPedometer.isStepCountingAvailable() else { return nil }
+        let start = Calendar.current.startOfDay(for: Date())
+        return await withCheckedContinuation { done in
+            pedometer.queryPedometerData(from: start, to: Date()) { data, _ in
+                guard let steps = data?.numberOfSteps.intValue else { done.resume(returning: nil); return }
+                let number = NumberFormatter.localizedString(from: NSNumber(value: steps), number: .decimal)
+                done.resume(returning: "\(number) steps today")
+            }
+        }
+    }
+
+    /// Gathers everything and returns four slots to send: weather, two events, steps.
+    /// A slot that is switched off or unavailable is an empty string.
     func gather() async -> [String] {
-        var lines: [String] = []
+        var weather = ""
         if showWeather {
             if let fresh = await fetchWeather() {
                 await MainActor.run {
                     weatherLine = fresh
                     UserDefaults.standard.set(fresh, forKey: "weatherLine")
                 }
-                lines.append(fresh)
-            } else if !weatherLine.isEmpty {
-                lines.append(weatherLine)
+                weather = fresh
+            } else {
+                weather = weatherLine
             }
         }
+        var events: [String] = []
         if showCalendar {
-            let events = upcomingEvents()
-            await MainActor.run { eventLines = events }
-            lines.append(contentsOf: events)
+            events = upcomingEvents()
+            let found = events
+            await MainActor.run { eventLines = found }
         }
-        return lines
+        var steps = ""
+        if showSteps, let line = await stepsToday() { steps = line }
+        let stepsNow = steps
+        await MainActor.run { stepsLine = stepsNow }
+        return [weather, events.first ?? "", events.dropFirst().first ?? "", steps]
     }
 
     private func fetchWeather() async -> String? {

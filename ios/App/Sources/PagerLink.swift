@@ -152,8 +152,11 @@ final class PagerLink: NSObject, ObservableObject, CBCentralManagerDelegate, CBP
     }
 
     func sendHomeLines(_ lines: [String]) {
-        let text = lines.prefix(3).map { Self.plain($0, limit: 40) }.joined(separator: "\n")
-        send("I", Data(text.utf8))
+        // Four fixed slots: weather, two events, steps. An empty slot is sent as an empty line.
+        var slots = lines.prefix(4).map { Self.plain($0, limit: 40) }
+        while slots.count < 4 { slots.append("") }
+        send("I", Data(slots.joined(separator: "\n").utf8))
+        let text = slots.filter { !$0.isEmpty }.joined(separator: "\n")
         lastSent = text
         lastSentAt = Date()
         UserDefaults.standard.set(text, forKey: "lastSent")
@@ -183,6 +186,15 @@ final class PagerLink: NSObject, ObservableObject, CBCentralManagerDelegate, CBP
         withUnsafeBytes(of: &size) { header.append(contentsOf: $0) }
         header.append(Data(clean.utf8))
         begin(name: clean, command: "N", header: header, body: body, done: done)
+    }
+
+    /// Sends raw bytes as a file, used for the photo face.
+    func sendData(name: String, data: Data, done: @escaping (Bool, String) -> Void) {
+        var header = Data()
+        var size = UInt32(data.count).littleEndian
+        withUnsafeBytes(of: &size) { header.append(contentsOf: $0) }
+        header.append(Data(name.utf8))
+        begin(name: name, command: "N", header: header, body: data, done: done)
     }
 
     /// Installs new pager firmware.

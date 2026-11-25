@@ -102,7 +102,7 @@ struct PendingFetch {
   bool preexisting;  // was already on the phone before the pager connected
 };
 
-static const char* const FIRMWARE_VERSION = "v1.5";
+static const char* const FIRMWARE_VERSION = "v1.6";
 
 // One write to the phone's control point, carried out by the Bluetooth task.
 struct BleRequest {
@@ -191,7 +191,9 @@ enum Screen {
   SCREEN_COIN,
   SCREEN_FILES,
   SCREEN_NOTE,
-  SCREEN_UPDATE
+  SCREEN_UPDATE,
+  SCREEN_SNAKE,
+  SCREEN_2048
 };
 static Screen g_screen = SCREEN_HOME;
 
@@ -244,6 +246,18 @@ static int g_detailLines = 0;
 static int g_settingsSel = 0;
 static int g_settingsTop = 0;
 static uint8_t g_sleepFace = 0;  // 0 = status, 1 = my card
+// Home screen face: 0 classic, 1 big clock, 2 weather, 3 agenda, 4 minimal, 5 photo.
+static const int FACE_COUNT = 6;
+static const char* const FACE_NAMES[FACE_COUNT] = {"Classic", "Big clock", "Weather",
+                                                   "Agenda",  "Minimal",   "Photo"};
+static uint8_t g_face = 0;
+// The photo face: a 250 x 122 one-bit picture the app sends as "face.img".
+static const size_t PHOTO_BYTES = ((EPD_WIDTH + 7) / 8) * EPD_HEIGHT;
+static uint8_t g_photo[PHOTO_BYTES];
+static bool g_photoTried = false;
+static bool g_photoOk = false;
+static volatile bool g_repeatOk = false;   // holding the wheel up or down repeats
+static volatile bool g_rendering = false;
 static volatile uint32_t g_pressAtMs = 0;  // when the button being handled went down
 static NimBLECharacteristic* g_hidInput = nullptr;
 
@@ -681,6 +695,7 @@ extern "C" void ble_svc_gatt_changed(uint16_t start_handle, uint16_t end_handle)
 
 static String g_infoWeather;                   // home screen lines from the app
 static String g_infoEvents[2];
+static String g_infoExtra;                     // steps today, from the app
 static String g_cardName = CARD_NAME;
 static String g_cardLine1 = CARD_LINE1;
 static String g_cardLine2 = CARD_LINE2;
@@ -759,6 +774,7 @@ static String settingsText() {
   s += "sleep=" + String((int)g_sleepChoice) + "\n";
   s += "check=" + String((int)g_checkChoice) + "\n";
   s += "face=" + String((int)g_sleepFace) + "\n";
+  s += "home=" + String((int)g_face) + "\n";
   s += "name=" + g_cardName + "\n";
   s += "line1=" + g_cardLine1 + "\n";
   s += "line2=" + g_cardLine2 + "\n";
@@ -1542,7 +1558,127 @@ static void drawSmallCentered(const String& text, int top) {
   g_canvas.print(text);
 }
 
+static bool photoReady();
+static int unreadCount();
+
+static String unreadText() {
+  int unread = unreadCount();
+  if (unread > 0) return String(unread) + " new";
+  return "";
+}
+
+// The alternative home screens. Each one is drawn from the same few facts:
+// the time, the date, the app's weather and calendar lines, and the unread count.
+static void drawFace(const String& clock, const String& ampm, const String& date,
+                     const String& shortDate) {
+  String unread = unreadText();
+  String link = g_ancsReady ? String("") : linkStatus();
+  g_canvas.setTextColor(1);
+
+  if (g_face == 1 || g_face == 4) {
+    // Big clock, and the same with nothing else on it.
+    bool minimal = (g_face == 4);
+    g_canvas.setFont(&FreeSansBold24pt7b);
+    g_canvas.setTextSize(2);
+    int w = textWidth(clock);
+    if (w > EPD_WIDTH - 4) {
+      g_canvas.setTextSize(1);
+      w = textWidth(clock);
+    }
+    g_canvas.setCursor((EPD_WIDTH - w) / 2 - 2, minimal ? 92 : 76);
+    g_canvas.print(clock);
+    g_canvas.setTextSize(1);
+    if (minimal) return;
+    g_canvas.drawFastHLine(8, 90, EPD_WIDTH - 16, 1);
+    g_canvas.setFont(&FreeSansBold9pt7b);
+    String left = shortDate + (ampm.length() ? "  " + ampm : "");
+    g_canvas.setCursor(8, 110);
+    g_canvas.print(left);
+    String right = unread.length() ? unread : (link.length() ? link : g_infoExtra);
+    right = fitText(right, EPD_WIDTH - textWidth(left) - 28);
+    g_canvas.setCursor(EPD_WIDTH - 8 - textWidth(right), 110);
+    g_canvas.print(right);
+    return;
+  }
+
+  if (g_face == 2) {
+    // Weather first: temperature and sky in large type, the rest underneath.
+    String headline = g_infoWeather, detail;
+    int cut = g_infoWeather.indexOf("  ");
+    if (cut > 0) {
+      headline = g_infoWeather.substring(0, cut);
+      detail = g_infoWeather.substring(cut + 2);
+    }
+    if (!headline.length()) headline = "No weather yet";
+    g_canvas.setFont(&FreeSansBold24pt7b);
+    if (textWidth(headline) > EPD_WIDTH - 8) g_canvas.setFont(&FreeSansBold9pt7b);
+    drawCentered(headline, 44);
+    g_canvas.setFont(&FreeSansBold9pt7b);
+    if (detail.length()) drawCentered(fitText(detail, EPD_WIDTH - 10), 68);
+    g_canvas.drawFastHLine(8, 78, EPD_WIDTH - 16, 1);
+    String when = clock + (ampm.length() ? " " + ampm : "") + "   " + shortDate;
+    drawCentered(when, 98);
+    String last = unread.length() ? unread + " notifications" : g_infoEvents[0];
+    if (!last.length()) last = g_infoExtra;
+    drawSmallCentered(fitText(last, EPD_WIDTH - 10), 108);
+    return;
+  }
+
+  if (g_face == 3) {
+    // Agenda: what is coming up, with the clock tucked into the top bar.
+    drawHeader(clock + (ampm.length() ? " " + ampm : "") + "  " + shortDate,
+               unread.length() ? unread : link);
+    g_canvas.setTextColor(1);
+    String rows[4];
+    int count = 0;
+    if (g_infoEvents[0].length()) rows[count++] = g_infoEvents[0];
+    if (g_infoEvents[1].length()) rows[count++] = g_infoEvents[1];
+    if (!count) rows[count++] = "Nothing coming up";
+    if (g_infoWeather.length()) rows[count++] = g_infoWeather;
+    if (g_infoExtra.length() && count < 4) rows[count++] = g_infoExtra;
+    int y = 36;
+    for (int i = 0; i < count; i++) {
+      bool event = (i < 2 && rows[i] != g_infoWeather && rows[i] != g_infoExtra);
+      g_canvas.setFont(event ? &FreeSansBold9pt7b : &FreeSans9pt7b);
+      g_canvas.setCursor(6, y);
+      g_canvas.print(fitText(rows[i], EPD_WIDTH - 12));
+      y += 24;
+    }
+    return;
+  }
+
+  // Photo, with the time in a small label in the corner.
+  if (photoReady()) {
+    g_canvas.drawBitmap(0, 0, g_photo, EPD_WIDTH, EPD_HEIGHT, 1);
+  } else {
+    g_canvas.setFont(&FreeSansBold9pt7b);
+    drawCentered("No photo yet", 50);
+    drawSmallCentered("Pick one in the Inkfob app, under Faces", 64);
+  }
+  g_canvas.setFont(&FreeSansBold9pt7b);
+  String label = clock + (unread.length() ? "  " + unread : "");
+  int w = textWidth(label) + 14;
+  g_canvas.fillRoundRect(EPD_WIDTH - w - 4, EPD_HEIGHT - 26, w, 22, 5, 0);
+  g_canvas.drawRoundRect(EPD_WIDTH - w - 4, EPD_HEIGHT - 26, w, 22, 5, 1);
+  g_canvas.setCursor(EPD_WIDTH - w + 3, EPD_HEIGHT - 10);
+  g_canvas.print(label);
+}
+
 static void drawHome() {
+  ClockNow faceNow;
+  if (g_face != 0 && clockNow(faceNow)) {
+    static const char* const SHORT_DAYS[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+    static const char* const SHORT_MONTHS[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    int hour12 = faceNow.hour % 12;
+    if (hour12 == 0) hour12 = 12;
+    String clock = String(hour12) + ":" + (faceNow.minute < 10 ? "0" : "") + String(faceNow.minute);
+    String shortDate = String(SHORT_DAYS[faceNow.weekday]) + " " + SHORT_MONTHS[faceNow.month - 1] +
+                       " " + String(faceNow.day);
+    g_homeMinute = faceNow.hour * 60 + faceNow.minute;
+    drawFace(clock, faceNow.hour < 12 ? "AM" : "PM", shortDate, shortDate);
+    return;
+  }
   String right = linkStatus();
   if (g_ancsReady && g_phoneBattery >= 0) right = "iPhone " + String(g_phoneBattery) + "%";
   drawHeader("PAGER", right);
@@ -1601,6 +1737,7 @@ static void drawHome() {
   if (g_infoEvents[0].length()) lines[count++] = g_infoEvents[0];
   lines[count++] = summary;
   if (count < 3 && g_infoEvents[1].length()) lines[count++] = g_infoEvents[1];
+  if (count < 3 && g_infoExtra.length()) lines[count++] = g_infoExtra;
   if (count < 3 && g_mediaTitle.length()) {
     String playing = String(g_mediaPlaying ? "Playing: " : "Paused: ") + g_mediaTitle;
     if (g_mediaArtist.length()) playing += " - " + g_mediaArtist;
@@ -1907,7 +2044,7 @@ static void drawDetail() {
   }
 }
 
-static const int SETTINGS_COUNT = 10;
+static const int SETTINGS_COUNT = 11;
 
 static String minutesLabel(int minutes) {
   if (minutes >= 60) return String(minutes / 60) + (minutes == 60 ? " hour" : " hours");
@@ -1930,8 +2067,9 @@ static String settingsLabel(int i) {
              (minutes ? "every " + minutesLabel(minutes) : String("Off"));
     }
     case 6: return String("Sleep screen: ") + (g_sleepFace ? "My card" : "Status");
-    case 7: return "Status";
-    case 8: return "Clear list";
+    case 7: return String("Home face: ") + FACE_NAMES[g_face];
+    case 8: return "Status";
+    case 9: return "Clear list";
     default: return "Forget phone";
   }
 }
@@ -2052,10 +2190,26 @@ static void refreshFileList() {
   g_fileNames.clear();
   if (!g_fsReady) return;
   File root = LittleFS.open("/");
-  for (File f = root.openNextFile(); f; f = root.openNextFile()) g_fileNames.push_back(String(f.name()));
+  for (File f = root.openNextFile(); f; f = root.openNextFile()) {
+    String name = String(f.name());
+    if (!name.endsWith(".img")) g_fileNames.push_back(name);  // the photo face is not a note
+  }
   std::sort(g_fileNames.begin(), g_fileNames.end(),
             [](const String& a, const String& b) { return a.compareTo(b) < 0; });
   if (g_fileSel >= (int)g_fileNames.size()) g_fileSel = max(0, (int)g_fileNames.size() - 1);
+}
+
+static bool photoReady() {
+  if (!g_photoTried) {
+    g_photoTried = true;
+    g_photoOk = false;
+    if (g_fsReady) {
+      File f = LittleFS.open("/face.img", "r");
+      if (f && f.size() == PHOTO_BYTES) g_photoOk = (f.read(g_photo, PHOTO_BYTES) == (int)PHOTO_BYTES);
+      if (f) f.close();
+    }
+  }
+  return g_photoOk;
 }
 
 // Reads the next screen line (up to 40 characters, broken at a space).
@@ -2187,6 +2341,11 @@ static void applyAppSetting(const String& pair) {
   } else if (key == "face") {
     g_sleepFace = number ? 1 : 0;
     g_prefs.putUChar("sleepFace", g_sleepFace);
+  } else if (key == "home" && number >= 0 && number < FACE_COUNT) {
+    g_face = (uint8_t)number;
+    g_prefs.putUChar("homeFace", g_face);
+    g_photoTried = false;
+    g_forceFull = true;
   } else if (key == "name") {
     g_cardName = value.substring(0, 40);
     g_prefs.putString("cName", g_cardName);
@@ -2219,15 +2378,16 @@ static void serviceAppLink() {
       markDirty(200);
     } else if (c.cmd == 'I') {
       // weather on the first line, then up to two upcoming events
-      String parts[3];
+      String parts[4];
       int part = 0;
-      for (size_t i = 0; i < text.length() && part < 3; i++) {
+      for (size_t i = 0; i < text.length() && part < 4; i++) {
         if (text[i] == '\n') part++;
         else parts[part] += text[i];
       }
       g_infoWeather = parts[0];
       g_infoEvents[0] = parts[1];
       g_infoEvents[1] = parts[2];
+      g_infoExtra = parts[3];
       if (g_screen == SCREEN_HOME) markDirty(300);
     }
   }
@@ -2235,7 +2395,12 @@ static void serviceAppLink() {
   if (g_filesChanged) {
     g_filesChanged = false;
     refreshFileList();
+    g_photoTried = false;
     if (g_screen == SCREEN_FILES) markDirty(200);
+    if (g_screen == SCREEN_HOME && g_face == 5) {
+      g_forceFull = true;
+      markDirty(200);
+    }
   }
 
   // Firmware install: show progress, and keep the screen on it.
@@ -2285,7 +2450,7 @@ int qrcodegen_getSize(const uint8_t qrcode[]);
 bool qrcodegen_getModule(const uint8_t qrcode[], int x, int y);
 }
 
-static const int TOOLS_COUNT = 7;
+static const int TOOLS_COUNT = 9;
 static int g_toolsSel = 0;
 
 // Countdown timer
@@ -2324,8 +2489,22 @@ static const char* const ORACLE_ANSWERS[] = {
 };
 static const int ORACLE_COUNT = sizeof(ORACLE_ANSWERS) / sizeof(ORACLE_ANSWERS[0]);
 
+// Snake: a 31 x 13 board of 8-pixel squares under the top bar.
+static const int SN_COLS = 31, SN_ROWS = 13, SN_CELL = 8, SN_MAX = 240;
+static const uint32_t SN_STEP_MS = 650;
+static uint8_t g_snX[SN_MAX], g_snY[SN_MAX];  // [0] is the head
+static int g_snLen = 0, g_snDir = 0, g_snTurn = 0;  // dir: 0 right, 1 down, 2 left, 3 up
+static int g_snFoodX = 0, g_snFoodY = 0, g_snBest = 0;
+static bool g_snAlive = false, g_snPaused = true;
+static uint32_t g_snNextMs = 0;
+
+// 2048: each square holds a power of two (0 = empty).
+static uint8_t g_tiles[16];
+static uint32_t g_tScore = 0, g_tBest = 0;
+static bool g_tOver = false, g_tStarted = false;
+
 static bool isToolScreen() {
-  return g_screen == SCREEN_TOOLS || g_screen == SCREEN_TIMER || g_screen == SCREEN_STOPWATCH ||
+  return g_screen == SCREEN_SNAKE || g_screen == SCREEN_2048 || g_screen == SCREEN_TOOLS || g_screen == SCREEN_TIMER || g_screen == SCREEN_STOPWATCH ||
          g_screen == SCREEN_REMOTE || g_screen == SCREEN_CARD || g_screen == SCREEN_ORACLE ||
          g_screen == SCREEN_DICE || g_screen == SCREEN_COIN;
 }
@@ -2375,13 +2554,194 @@ static String toolsLabel(int i) {
     case 3: return "My card (QR code)";
     case 4: return "Oracle";
     case 5: return "Dice";
-    default: return "Coin flip";
+    case 6: return "Coin flip";
+    case 7: return "Game: Snake";
+    default: return "Game: 2048";
   }
 }
 
 static void drawTools() {
   drawHeader("TOOLS", "EXIT = back");
   drawRows(TOOLS_COUNT, g_toolsSel, 0, toolsLabel);
+}
+
+static void snakeFood() {
+  for (int tries = 0; tries < 400; tries++) {
+    int x = (int)(esp_random() % SN_COLS), y = (int)(esp_random() % SN_ROWS);
+    bool onSnake = false;
+    for (int i = 0; i < g_snLen; i++) onSnake |= (g_snX[i] == x && g_snY[i] == y);
+    if (!onSnake) {
+      g_snFoodX = x;
+      g_snFoodY = y;
+      return;
+    }
+  }
+}
+
+static void snakeStart() {
+  g_snLen = 4;
+  for (int i = 0; i < g_snLen; i++) {
+    g_snX[i] = 8 - i;
+    g_snY[i] = SN_ROWS / 2;
+  }
+  g_snDir = 0;
+  g_snTurn = 0;
+  g_snAlive = true;
+  g_snPaused = false;
+  g_snNextMs = millis() + SN_STEP_MS;
+  snakeFood();
+}
+
+static void snakeStep() {
+  g_snDir = (g_snDir + g_snTurn + 4) % 4;
+  g_snTurn = 0;
+  static const int DX[] = {1, 0, -1, 0}, DY[] = {0, 1, 0, -1};
+  int x = g_snX[0] + DX[g_snDir], y = g_snY[0] + DY[g_snDir];
+  bool hit = (x < 0 || y < 0 || x >= SN_COLS || y >= SN_ROWS);
+  for (int i = 0; i < g_snLen - 1 && !hit; i++) hit = (g_snX[i] == x && g_snY[i] == y);
+  if (hit) {
+    g_snAlive = false;
+    if (g_snLen - 4 > g_snBest) {
+      g_snBest = g_snLen - 4;
+      g_prefs.putInt("snBest", g_snBest);
+    }
+    return;
+  }
+  bool ate = (x == g_snFoodX && y == g_snFoodY);
+  if (ate && g_snLen < SN_MAX) g_snLen++;
+  for (int i = g_snLen - 1; i > 0; i--) {
+    g_snX[i] = g_snX[i - 1];
+    g_snY[i] = g_snY[i - 1];
+  }
+  g_snX[0] = x;
+  g_snY[0] = y;
+  if (ate) snakeFood();
+}
+
+static void drawSnake() {
+  drawHeader("SNAKE  " + String(g_snLen > 4 ? g_snLen - 4 : 0), "best " + String(g_snBest));
+  g_canvas.setTextColor(1);
+  if (g_snLen == 0) {
+    drawMedium("Snake", 46);
+    drawHint("Wheel up: turn left     Wheel down: turn right", 62);
+    drawHint("Press the wheel to start or pause", 78);
+    return;
+  }
+  const int ox = 1, oy = HEADER_H + 2;
+  for (int i = 0; i < g_snLen; i++) {
+    int px = ox + g_snX[i] * SN_CELL, py = oy + g_snY[i] * SN_CELL;
+    if (i == 0) g_canvas.fillRect(px, py, SN_CELL, SN_CELL, 1);
+    else g_canvas.fillRect(px + 1, py + 1, SN_CELL - 2, SN_CELL - 2, 1);
+  }
+  g_canvas.drawCircle(ox + g_snFoodX * SN_CELL + 3, oy + g_snFoodY * SN_CELL + 3, 3, 1);
+  if (!g_snAlive || g_snPaused) {
+    String text = g_snAlive ? "Paused" : "Game over: " + String(g_snLen - 4);
+    g_canvas.setFont(&FreeSansBold9pt7b);
+    int w = textWidth(text) + 20;
+    g_canvas.fillRect((EPD_WIDTH - w) / 2, 46, w, 40, 0);
+    g_canvas.drawRect((EPD_WIDTH - w) / 2, 46, w, 40, 1);
+    drawCentered(text, 64);
+    drawSmallCentered(g_snAlive ? "Press: go on" : "Press: play again", 72);
+  }
+}
+
+static void tilesAdd() {
+  int empty[16], n = 0;
+  for (int i = 0; i < 16; i++) if (!g_tiles[i]) empty[n++] = i;
+  if (n) g_tiles[empty[esp_random() % n]] = (esp_random() % 10 == 0) ? 2 : 1;
+}
+
+static void tilesStart() {
+  memset(g_tiles, 0, sizeof(g_tiles));
+  g_tScore = 0;
+  g_tOver = false;
+  g_tStarted = true;
+  tilesAdd();
+  tilesAdd();
+}
+
+// Slides the board one way: 0 left, 1 right, 2 up, 3 down. Returns true if anything moved.
+static bool tilesMove(int way) {
+  bool moved = false;
+  for (int line = 0; line < 4; line++) {
+    int idx[4];
+    for (int k = 0; k < 4; k++) {
+      int pos = (way == 0 || way == 2) ? k : 3 - k;
+      idx[k] = (way < 2) ? line * 4 + pos : pos * 4 + line;
+    }
+    uint8_t out[4] = {0, 0, 0, 0};
+    int n = 0;
+    bool merged = false;
+    for (int k = 0; k < 4; k++) {
+      uint8_t v = g_tiles[idx[k]];
+      if (!v) continue;
+      if (n > 0 && out[n - 1] == v && !merged) {
+        out[n - 1]++;
+        g_tScore += 1u << out[n - 1];
+        merged = true;
+      } else {
+        out[n++] = v;
+        merged = false;
+      }
+    }
+    for (int k = 0; k < 4; k++) {
+      if (g_tiles[idx[k]] != out[k]) moved = true;
+      g_tiles[idx[k]] = out[k];
+    }
+  }
+  return moved;
+}
+
+static bool tilesStuck() {
+  for (int i = 0; i < 16; i++) {
+    if (!g_tiles[i]) return false;
+    if (i % 4 < 3 && g_tiles[i] == g_tiles[i + 1]) return false;
+    if (i < 12 && g_tiles[i] == g_tiles[i + 4]) return false;
+  }
+  return true;
+}
+
+static void draw2048() {
+  drawHeader("2048", "EXIT = back");
+  g_canvas.setTextColor(1);
+  if (!g_tStarted) tilesStart();
+  const int ox = 3, oy = HEADER_H + 1, pitch = 27;
+  for (int i = 0; i < 16; i++) {
+    int x = ox + (i % 4) * pitch, y = oy + (i / 4) * pitch;
+    uint8_t v = g_tiles[i];
+    bool dark = v >= 7;  // 128 and up are drawn white on black
+    if (dark) g_canvas.fillRoundRect(x, y, pitch - 2, pitch - 2, 3, 1);
+    else g_canvas.drawRoundRect(x, y, pitch - 2, pitch - 2, 3, 1);
+    if (!v) continue;
+    String text = String(1u << v);
+    g_canvas.setTextColor(dark ? 0 : 1);
+    if (text.length() <= 2) {
+      g_canvas.setFont(&FreeSansBold9pt7b);
+      g_canvas.setCursor(x + (pitch - 2 - textWidth(text)) / 2 - 1, y + 18);
+    } else {
+      g_canvas.setFont(nullptr);
+      g_canvas.setTextSize(1);
+      g_canvas.setCursor(x + (pitch - 2 - (int)text.length() * 6) / 2 + 1, y + 9);
+    }
+    g_canvas.print(text);
+  }
+  g_canvas.setTextColor(1);
+  const int px = 118;
+  g_canvas.setFont(&FreeSansBold9pt7b);
+  g_canvas.setCursor(px, 34);
+  g_canvas.print(g_tOver ? "Game over" : "Score");
+  g_canvas.setCursor(px, 54);
+  g_canvas.print(String(g_tScore));
+  g_canvas.setFont(nullptr);
+  g_canvas.setTextSize(1);
+  g_canvas.setCursor(px, 64);
+  g_canvas.print("Best " + String(g_tBest));
+  g_canvas.setCursor(px, 82);
+  g_canvas.print(g_tOver ? "Press: new game" : "Wheel: up / down");
+  g_canvas.setCursor(px, 94);
+  g_canvas.print(g_tOver ? "" : "MENU: left");
+  g_canvas.setCursor(px, 106);
+  g_canvas.print(g_tOver ? "" : "Press: right");
 }
 
 static void drawTimer() {
@@ -2574,13 +2934,44 @@ static bool onToolPress(int pin) {
     if (pin == PIN_CLICK) {
       static const Screen TARGETS[TOOLS_COUNT] = {SCREEN_TIMER, SCREEN_STOPWATCH, SCREEN_REMOTE,
                                                   SCREEN_CARD,  SCREEN_ORACLE,    SCREEN_DICE,
-                                                  SCREEN_COIN};
+                                                  SCREEN_COIN,  SCREEN_SNAKE,     SCREEN_2048};
       g_screen = TARGETS[g_toolsSel];
     }
     return true;
   }
   if (pin == PIN_EXIT && !(g_screen == SCREEN_TIMER && g_timerDone)) {
+    if (g_screen == SCREEN_SNAKE && g_snAlive) g_snPaused = true;
     g_screen = SCREEN_TOOLS;
+    g_forceFull = true;
+    return true;
+  }
+
+  if (g_screen == SCREEN_SNAKE) {
+    if (pin == PIN_CLICK) {
+      if (!g_snAlive) snakeStart();
+      else {
+        g_snPaused = !g_snPaused;
+        g_snNextMs = millis() + SN_STEP_MS;
+      }
+      return true;
+    }
+    if (pin == PIN_MENU) return false;
+    if (g_snAlive && !g_snPaused) g_snTurn = (pin == PIN_UP) ? -1 : 1;
+    return false;  // the next step draws it
+  }
+  if (g_screen == SCREEN_2048) {
+    if (g_tOver) {
+      if (pin == PIN_CLICK) tilesStart();
+      return pin == PIN_CLICK;
+    }
+    int way = (pin == PIN_MENU) ? 0 : (pin == PIN_CLICK) ? 1 : (pin == PIN_UP) ? 2 : 3;
+    if (!tilesMove(way)) return false;
+    tilesAdd();
+    if (g_tScore > g_tBest) g_tBest = g_tScore;
+    if (tilesStuck()) {
+      g_tOver = true;
+      g_prefs.putUInt("t48Best", g_tBest);
+    }
     return true;
   }
 
@@ -2685,6 +3076,13 @@ static void serviceTools() {
       markDirty(1);
     }
   }
+  if (g_screen == SCREEN_SNAKE && g_snAlive && !g_snPaused &&
+      (int32_t)(millis() - g_snNextMs) >= 0) {
+    g_snNextMs = millis() + SN_STEP_MS;
+    snakeStep();
+    g_lastActivityMs = millis();
+    markDirty(1);
+  }
   if (g_screen == SCREEN_STOPWATCH && g_swRunning) {
     int sec = (int)(stopwatchMs() / 1000);
     if (sec != g_swShownSec) {
@@ -2716,10 +3114,13 @@ static void render() {
     case SCREEN_FILES: drawFiles(); break;
     case SCREEN_NOTE: drawNote(); break;
     case SCREEN_UPDATE: drawUpdate(); break;
+    case SCREEN_SNAKE: drawSnake(); break;
+    case SCREEN_2048: draw2048(); break;
     default: drawList(); break;
   }
   // A ticking timer would otherwise flash every half minute.
-  bool ticking = (g_screen == SCREEN_TIMER || g_screen == SCREEN_STOPWATCH);
+  bool ticking = (g_screen == SCREEN_TIMER || g_screen == SCREEN_STOPWATCH ||
+                  g_screen == SCREEN_SNAKE || g_screen == SCREEN_2048);
   bool full = g_forceFull || !g_fastRefresh || g_fastCount >= (ticking ? 150 : 30);
   Epd::show(g_canvas.getBuffer(), full);
   g_fastCount = full ? 0 : g_fastCount + 1;
@@ -2746,6 +3147,7 @@ static void inputTask(void*) {
   int heldBackPin = -1;  // an up/down nudge waiting to see if it is really a press
   uint32_t heldBackUntil = 0;
   uint32_t ignoreRockerUntil = 0;
+  uint32_t repeatAt = 0;
 
   for (;;) {
     uint32_t now = millis();
@@ -2773,6 +3175,16 @@ static void inputTask(void*) {
           g_pressAtMs = now;
           xQueueSend(g_buttonQueue, &pin, 0);
         }
+      }
+    }
+    // Holding the wheel up or down keeps moving through a list, one row per redraw.
+    for (int i = 0; i < 2; i++) {
+      if (stable[i] && g_repeatOk && !g_rendering && now - since[i] > 550 &&
+          (int32_t)(now - repeatAt) >= 0 && uxQueueMessagesWaiting(g_buttonQueue) == 0) {
+        int pin = BUTTON_PINS[i];
+        repeatAt = now + 180;
+        g_pressAtMs = now;
+        xQueueSend(g_buttonQueue, &pin, 0);
       }
     }
     if (heldBackPin >= 0 && (int32_t)(now - heldBackUntil) >= 0) {
@@ -2828,9 +3240,13 @@ static void onSettingsSelect() {
       g_prefs.putUChar("sleepFace", g_sleepFace);
       break;
     case 7:
-      g_screen = SCREEN_STATUS;
+      g_face = (g_face + 1) % FACE_COUNT;
+      g_prefs.putUChar("homeFace", g_face);
       break;
     case 8:
+      g_screen = SCREEN_STATUS;
+      break;
+    case 9:
       g_notes.clear();
       g_sel = 0;
       g_listTop = 0;
@@ -3314,6 +3730,10 @@ void setup() {
   if (g_sleepChoice >= SLEEP_CHOICES) g_sleepChoice = 0;
   if (g_checkChoice >= CHECK_CHOICES) g_checkChoice = 2;
   g_sleepFace = g_prefs.getUChar("sleepFace", 0) ? 1 : 0;
+  g_snBest = g_prefs.getInt("snBest", 0);
+  g_tBest = g_prefs.getUInt("t48Best", 0);
+  g_face = g_prefs.getUChar("homeFace", 0);
+  if (g_face >= FACE_COUNT) g_face = 0;
   g_cardName = g_prefs.getString("cName", CARD_NAME);
   g_cardLine1 = g_prefs.getString("cLine1", CARD_LINE1);
   g_cardLine2 = g_prefs.getString("cLine2", CARD_LINE2);
@@ -3379,6 +3799,9 @@ void loop() {
     delay(10);
     return;
   }
+  g_repeatOk = !g_dirty && (g_screen == SCREEN_MENU || g_screen == SCREEN_LIST ||
+                            g_screen == SCREEN_LIBRARY || g_screen == SCREEN_SETTINGS ||
+                            g_screen == SCREEN_TOOLS || g_screen == SCREEN_FILES);
   serviceTools();
   serviceIdle();
   if (g_dirty && (int32_t)(millis() - g_dirtyAtMs) >= 0) {
@@ -3388,7 +3811,9 @@ void loop() {
     if (!loading || g_dirtyUrgent || millis() - g_dirtySinceMs > 3000) {
       g_dirty = false;
       g_dirtyUrgent = false;
+      g_rendering = true;
       render();
+      g_rendering = false;
     }
   }
   delay(10);

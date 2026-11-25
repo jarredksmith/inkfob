@@ -7,6 +7,9 @@ struct FilesView: View {
     @State private var importing = false
     @State private var message = ""
 
+    /// The photo face is stored as a file too, but it is not something to read.
+    private var shownFiles: [PagerFile] { link.files.filter { !$0.name.hasSuffix(".img") } }
+
     var body: some View {
         NavigationStack {
             List {
@@ -27,7 +30,7 @@ struct FilesView: View {
                     if link.files.isEmpty {
                         Text(link.isReady ? "Nothing yet" : "Connect the pager to see its files").foregroundStyle(.secondary)
                     }
-                    ForEach(link.files) { file in
+                    ForEach(shownFiles) { file in
                         HStack {
                             Text(file.name)
                             Spacer()
@@ -36,7 +39,7 @@ struct FilesView: View {
                         }
                     }
                     .onDelete { offsets in
-                        for index in offsets { link.deleteFile(link.files[index].name) }
+                        for name in offsets.map({ shownFiles[$0].name }) { link.deleteFile(name) }
                     }
                     if link.isReady {
                         Text("\(ByteCountFormatter.string(fromByteCount: Int64(link.freeBytes), countStyle: .file)) free")

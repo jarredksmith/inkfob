@@ -53,6 +53,7 @@ struct RootView: View {
     var body: some View {
         TabView {
             HomeView().tabItem { Label("Pager", systemImage: "rectangle.inset.filled") }
+            FacesView().tabItem { Label("Faces", systemImage: "square.on.square") }
             FilesView().tabItem { Label("Files", systemImage: "doc.text") }
             PagerSettingsView().tabItem { Label("Settings", systemImage: "slider.horizontal.3") }
             UpdateView().tabItem { Label("Update", systemImage: "arrow.down.circle") }
