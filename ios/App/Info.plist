@@ -5,10 +5,12 @@
 	<!-- Merged with the keys Xcode generates from the INFOPLIST_KEY_* settings in project.yml. -->
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
-	<!-- bluetooth-central: the pager can wake the app to ask for fresh weather and calendar lines. -->
+	<!-- bluetooth-central: the pager can wake the app to ask for fresh weather and calendar lines.
+	     audio: lets "Find my phone" ring when the pager asks while the app is in the background. -->
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>bluetooth-central</string>
+		<string>audio</string>
 	</array>
 </dict>
 </plist>

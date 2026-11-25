@@ -12,6 +12,7 @@ PlatformIO: `pio run`. The merged image is made with `esptool.py merge_bin`
 ## Controls
 - Home (clock): rocker up or press opens notifications, rocker down opens Now Playing, MENU opens the main menu, EXIT does a clean-up refresh
 - Main menu: Notifications, Library, Now Playing, Tools, Settings, Sleep now
+- More of everything (v1.7): Custom face with a chosen fact in each corner (`corners=` setting), Today screen fed by the `J` (countdown, reminder, ticker) and `Q` (line for the day) commands, Find my phone (`B` event to the app), Pomodoro, tally, tip split, converter, Morse, Hangman, Minesweeper, and flashcard decks (files ending `.cards`, one `question | answer` per line).
 - Faces and games (v1.6): six home screen faces (Settings > Home face, or the app), a photo face sent as `face.img` (250 x 122, 1 bit, 1 = black), steps line, Snake and 2048 under Tools, hold the wheel to keep scrolling.
 - App link (v1.5): a private Bluetooth service (1F0B0001-8A4E-4C1B-9E2D-5B7A1C3D9F10) for the
   Inkfob iPhone app. Control characteristic ...0002 takes one command per write (first byte):

@@ -35,6 +35,8 @@ final class PagerLink: NSObject, ObservableObject, CBCentralManagerDelegate, CBP
 
     /// Called when the pager asks for fresh weather and calendar (also wakes the app in the background).
     var onRefreshRequest: (() -> Void)?
+    /// Called when someone uses the pager's "Find my phone" tool.
+    var onFindPhone: (() -> Void)?
 
     private var central: CBCentralManager!
     private var pager: CBPeripheral?
@@ -163,6 +165,18 @@ final class PagerLink: NSObject, ObservableObject, CBCentralManagerDelegate, CBP
         UserDefaults.standard.set(lastSentAt, forKey: "lastSentAt")
     }
 
+    /// The slower lines: countdown, reminder, stock or score. Always three slots.
+    func sendMore(_ lines: [String]) {
+        var slots = lines.prefix(3).map { Self.plain($0, limit: 40) }
+        while slots.count < 3 { slots.append("") }
+        send("J", Data(slots.joined(separator: "\n").utf8))
+    }
+
+    /// The line for the day, shown on the pager's Today screen.
+    func sendDayLine(_ text: String) {
+        send("Q", Data(Self.plain(text.replacingOccurrences(of: "\n", with: " "), limit: 190).utf8))
+    }
+
     func set(_ key: String, _ value: String) {
         settings[key] = value
         send("S", Data("\(key)=\(Self.plain(value, limit: 100))".utf8))
@@ -258,6 +272,8 @@ final class PagerLink: NSObject, ObservableObject, CBCentralManagerDelegate, CBP
         switch Character(UnicodeScalar(kind)) {
         case "R":
             onRefreshRequest?()
+        case "B":
+            onFindPhone?()
         case "A":
             pump()
         case "P":

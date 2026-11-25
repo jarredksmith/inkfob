@@ -12,6 +12,8 @@ struct InkfobApp: App {
                 .environmentObject(hub)
                 .environmentObject(hub.link)
                 .environmentObject(hub.feeds)
+                .environmentObject(hub.extras)
+                .environmentObject(hub.ringer)
                 .onChange(of: phase) { _, now in
                     if now == .active { hub.cameToFront() }
                 }
@@ -23,13 +25,18 @@ struct InkfobApp: App {
 final class Hub: ObservableObject {
     let link = PagerLink()
     let feeds = Feeds()
+    let extras = Extras()
+    let ringer = Ringer()
 
     init() {
         link.onRefreshRequest = { [weak self] in self?.pushHomeLines() }
+        link.onFindPhone = { [weak self] in self?.ringer.ring() }
     }
 
     func cameToFront() {
         feeds.refreshPermissions()
+        extras.refreshPermissions()
+        ringer.refresh()
         feeds.updateLocation()
         link.look()
         if link.isReady { pushHomeLines() }
@@ -41,8 +48,13 @@ final class Hub: ObservableObject {
         let task = UIApplication.shared.beginBackgroundTask(withName: "inkfob.push")
         Task {
             let lines = await feeds.gather()
+            let extra = await extras.gather()
             await MainActor.run {
-                if link.isReady { link.sendHomeLines(lines) }
+                if link.isReady {
+                    link.sendHomeLines(lines)
+                    link.sendMore(extra.more)
+                    link.sendDayLine(extra.dayLine)
+                }
                 UIApplication.shared.endBackgroundTask(task)
             }
         }

@@ -24,6 +24,7 @@ struct HomeView: View {
                     Toggle("Next calendar events", isOn: $feeds.showCalendar)
                     Toggle("Celsius", isOn: $feeds.useCelsius)
                     Toggle("Steps today", isOn: $feeds.showSteps)
+                    NavigationLink("More for the pager") { ExtrasView() }
                     Button("Send now") { hub.pushHomeLines() }
                         .disabled(!link.isReady)
                     if let at = link.lastSentAt {

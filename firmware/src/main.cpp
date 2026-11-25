@@ -102,7 +102,7 @@ struct PendingFetch {
   bool preexisting;  // was already on the phone before the pager connected
 };
 
-static const char* const FIRMWARE_VERSION = "v1.6";
+static const char* const FIRMWARE_VERSION = "v1.7";
 
 // One write to the phone's control point, carried out by the Bluetooth task.
 struct BleRequest {
@@ -193,7 +193,18 @@ enum Screen {
   SCREEN_NOTE,
   SCREEN_UPDATE,
   SCREEN_SNAKE,
-  SCREEN_2048
+  SCREEN_2048,
+  SCREEN_TODAY,
+  SCREEN_DECK,
+  SCREEN_GAMES,
+  SCREEN_POMO,
+  SCREEN_TALLY,
+  SCREEN_TIP,
+  SCREEN_CONVERT,
+  SCREEN_FIND,
+  SCREEN_MORSE,
+  SCREEN_HANGMAN,
+  SCREEN_MINES
 };
 static Screen g_screen = SCREEN_HOME;
 
@@ -247,9 +258,13 @@ static int g_settingsSel = 0;
 static int g_settingsTop = 0;
 static uint8_t g_sleepFace = 0;  // 0 = status, 1 = my card
 // Home screen face: 0 classic, 1 big clock, 2 weather, 3 agenda, 4 minimal, 5 photo.
-static const int FACE_COUNT = 6;
-static const char* const FACE_NAMES[FACE_COUNT] = {"Classic", "Big clock", "Weather",
-                                                   "Agenda",  "Minimal",   "Photo"};
+static const int FACE_COUNT = 7;
+static const char* const FACE_NAMES[FACE_COUNT] = {"Classic", "Big clock", "Weather", "Agenda",
+                                                   "Minimal", "Photo",     "Custom"};
+// The custom face: what goes in each corner (top left, top right, bottom left, bottom right).
+// 0 nothing, 1 date, 2 weather, 3 next event, 4 steps, 5 phone battery, 6 unread,
+// 7 countdown, 8 ticker, 9 reminder.
+static uint8_t g_corners[4] = {1, 2, 3, 6};
 static uint8_t g_face = 0;
 // The photo face: a 250 x 122 one-bit picture the app sends as "face.img".
 static const size_t PHOTO_BYTES = ((EPD_WIDTH + 7) / 8) * EPD_HEIGHT;
@@ -696,6 +711,8 @@ extern "C" void ble_svc_gatt_changed(uint16_t start_handle, uint16_t end_handle)
 static String g_infoWeather;                   // home screen lines from the app
 static String g_infoEvents[2];
 static String g_infoExtra;                     // steps today, from the app
+static String g_infoMore[3];                   // countdown, reminder, ticker
+static String g_quote;                         // the day's quote or fact
 static String g_cardName = CARD_NAME;
 static String g_cardLine1 = CARD_LINE1;
 static String g_cardLine2 = CARD_LINE2;
@@ -745,7 +762,7 @@ class AppControlCallbacks : public NimBLECharacteristicCallbacks {
     c.cmd = (char)value.data()[0];
     c.len = (uint16_t)min((size_t)(value.size() - 1), sizeof(c.text) - 1);
     memcpy(c.text, value.data() + 1, c.len);
-    bool forMain = (c.cmd == 'I' || c.cmd == 'S');
+    bool forMain = (c.cmd == 'I' || c.cmd == 'S' || c.cmd == 'J' || c.cmd == 'Q');
     xQueueSend(forMain ? g_appMainQueue : g_appWorkQueue, &c, 0);
   }
 };
@@ -775,6 +792,9 @@ static String settingsText() {
   s += "check=" + String((int)g_checkChoice) + "\n";
   s += "face=" + String((int)g_sleepFace) + "\n";
   s += "home=" + String((int)g_face) + "\n";
+  s += "corners=";
+  for (int i = 0; i < 4; i++) s += String((int)g_corners[i]);
+  s += "\n";
   s += "name=" + g_cardName + "\n";
   s += "line1=" + g_cardLine1 + "\n";
   s += "line2=" + g_cardLine2 + "\n";
@@ -1647,6 +1667,49 @@ static void drawFace(const String& clock, const String& ampm, const String& date
     return;
   }
 
+  if (g_face == 6) {
+    // Custom: the clock in the middle and a chosen fact in each corner.
+    g_canvas.setFont(&FreeSansBold24pt7b);
+    int clockW = textWidth(clock);
+    g_canvas.setFont(&FreeSansBold9pt7b);
+    int ampmW = ampm.length() ? textWidth(ampm) + 6 : 0;
+    int x = (EPD_WIDTH - clockW - ampmW) / 2;
+    g_canvas.setFont(&FreeSansBold24pt7b);
+    g_canvas.setCursor(x, 76);
+    g_canvas.print(clock);
+    g_canvas.setFont(&FreeSansBold9pt7b);
+    g_canvas.setCursor(x + clockW + 6, 76);
+    g_canvas.print(ampm);
+    g_canvas.setFont(nullptr);
+    g_canvas.setTextSize(1);
+    for (int i = 0; i < 4; i++) {
+      String text;
+      switch (g_corners[i]) {
+        case 1: text = shortDate; break;
+        case 2: {
+          int cut = g_infoWeather.indexOf("  ");
+          text = cut > 0 ? g_infoWeather.substring(0, cut) : g_infoWeather;
+          break;
+        }
+        case 3: text = g_infoEvents[0]; break;
+        case 4: text = g_infoExtra; text.replace(" today", ""); break;
+        case 5: text = g_phoneBattery >= 0 ? "Phone " + String(g_phoneBattery) + "%" : link; break;
+        case 6: text = unread.length() ? unread : String("0 new"); break;
+        case 7: text = g_infoMore[0]; break;
+        case 8: text = g_infoMore[2]; break;
+        case 9: text = g_infoMore[1]; break;
+        default: break;
+      }
+      if (text.length() > 20) text = text.substring(0, 20);
+      int tx = (i % 2 == 0) ? 5 : EPD_WIDTH - 5 - (int)text.length() * 6;
+      g_canvas.setCursor(tx, i < 2 ? 6 : EPD_HEIGHT - 14);
+      g_canvas.print(text);
+    }
+    g_canvas.drawFastHLine(5, 20, EPD_WIDTH - 10, 1);
+    g_canvas.drawFastHLine(5, EPD_HEIGHT - 21, EPD_WIDTH - 10, 1);
+    return;
+  }
+
   // Photo, with the time in a small label in the corner.
   if (photoReady()) {
     g_canvas.drawBitmap(0, 0, g_photo, EPD_WIDTH, EPD_HEIGHT, 1);
@@ -1750,6 +1813,62 @@ static void drawHome() {
   for (int i = 0; i < count && i < 3; i++) drawSmallCentered(fitText(lines[i], EPD_WIDTH - 10), top + i * step);
 }
 
+// Breaks text into lines of at most `width` characters, at spaces where it can.
+static std::vector<String> wrapText(const String& text, int width) {
+  std::vector<String> lines;
+  String line;
+  int start = 0;
+  while (start < (int)text.length()) {
+    int end = text.indexOf(' ', start);
+    if (end < 0) end = text.length();
+    String word = text.substring(start, end);
+    start = end + 1;
+    while ((int)word.length() > width) {
+      if (line.length()) {
+        lines.push_back(line);
+        line = "";
+      }
+      lines.push_back(word.substring(0, width));
+      word = word.substring(width);
+    }
+    if (line.length() && (int)(line.length() + 1 + word.length()) > width) {
+      lines.push_back(line);
+      line = "";
+    }
+    if (word.length()) line += (line.length() ? " " : "") + word;
+  }
+  if (line.length()) lines.push_back(line);
+  return lines;
+}
+
+// Everything the app has sent, on one page.
+static String clockText();
+static void drawToday() {
+  drawHeader("TODAY", clockText());
+  g_canvas.setTextColor(1);
+  g_canvas.setFont(nullptr);
+  g_canvas.setTextSize(1);
+  std::vector<String> rows;
+  const String* facts[] = {&g_infoWeather, &g_infoEvents[0], &g_infoEvents[1], &g_infoExtra,
+                           &g_infoMore[0], &g_infoMore[1],   &g_infoMore[2]};
+  for (const String* fact : facts) {
+    if (fact->length()) rows.push_back(fact->substring(0, 40));
+  }
+  if (g_quote.length()) {
+    if (!rows.empty()) rows.push_back("");
+    for (const String& line : wrapText(g_quote, 40)) rows.push_back(line);
+  }
+  if (rows.empty()) {
+    drawSmallCentered("Nothing from the phone yet.", 50);
+    drawSmallCentered("Open the Inkfob app to send today's lines.", 64);
+    return;
+  }
+  for (int i = 0; i < (int)rows.size() && i < 10; i++) {
+    g_canvas.setCursor(5, HEADER_H + 5 + i * 10);
+    g_canvas.print(rows[i]);
+  }
+}
+
 static void drawMedia() {
   g_canvas.setFont(nullptr);
   g_canvas.setTextSize(1);
@@ -1816,7 +1935,7 @@ static void drawRows(int count, int sel, int top, String (*label)(int)) {
   g_canvas.setTextColor(1);
 }
 
-static const int MAIN_MENU_COUNT = 7;
+static const int MAIN_MENU_COUNT = 8;
 
 static String mainMenuLabel(int i) {
   switch (i) {
@@ -1829,6 +1948,7 @@ static String mainMenuLabel(int i) {
     case 3: return "Tools";
     case 4: return "Settings";
     case 5: return "My files";
+    case 6: return "Today";
     default: return "Sleep now";
   }
 }
@@ -2199,6 +2319,61 @@ static void refreshFileList() {
   if (g_fileSel >= (int)g_fileNames.size()) g_fileSel = max(0, (int)g_fileNames.size() - 1);
 }
 
+// Flashcards: a file whose name ends in ".cards", one "question | answer" per line.
+static std::vector<uint32_t> g_deckLines;
+static String g_deckName;
+static int g_deckAt = 0;
+static bool g_deckBack = false;
+
+static bool openDeck(const String& name) {
+  File f = LittleFS.open("/" + name, "r");
+  if (!f) return false;
+  g_deckLines.clear();
+  uint32_t at = 0;
+  bool lineHasText = false;
+  while (f.available() && g_deckLines.size() < 500) {
+    int c = f.read();
+    if (c == '\n') {
+      if (lineHasText) g_deckLines.push_back(at);
+      at = f.position();
+      lineHasText = false;
+    } else if (c > ' ') {
+      lineHasText = true;
+    }
+  }
+  if (lineHasText) g_deckLines.push_back(at);
+  f.close();
+  g_deckName = name;
+  g_deckAt = 0;
+  g_deckBack = false;
+  return !g_deckLines.empty();
+}
+
+static void drawDeck() {
+  String title = g_deckName.substring(0, g_deckName.length() - 6);
+  drawHeader(title.substring(0, 28), String(g_deckAt + 1) + "/" + String((int)g_deckLines.size()));
+  g_canvas.setTextColor(1);
+  String line;
+  File f = LittleFS.open("/" + g_deckName, "r");
+  if (f) {
+    f.seek(g_deckLines[g_deckAt]);
+    line = f.readStringUntil('\n');
+    f.close();
+  }
+  line.trim();
+  int bar = line.indexOf('|');
+  String front = bar >= 0 ? line.substring(0, bar) : line;
+  String back = bar >= 0 ? line.substring(bar + 1) : String("(no answer on this line)");
+  front.trim();
+  back.trim();
+  std::vector<String> rows = wrapText(g_deckBack ? back : front, 24);
+  g_canvas.setFont(g_deckBack ? &FreeSans9pt7b : &FreeSansBold9pt7b);
+  int count = min((int)rows.size(), 4);
+  int y = 58 - (count - 1) * 10;
+  for (int i = 0; i < count; i++) drawCentered(rows[i], y + i * 20);
+  drawSmallCentered(g_deckBack ? "Answer     Wheel: next card" : "Press: show answer", EPD_HEIGHT - 12);
+}
+
 static bool photoReady() {
   if (!g_photoTried) {
     g_photoTried = true;
@@ -2346,6 +2521,9 @@ static void applyAppSetting(const String& pair) {
     g_prefs.putUChar("homeFace", g_face);
     g_photoTried = false;
     g_forceFull = true;
+  } else if (key == "corners" && value.length() == 4) {
+    for (int i = 0; i < 4; i++) g_corners[i] = (uint8_t)constrain(value[i] - '0', 0, 9);
+    g_prefs.putString("corners", value);
   } else if (key == "name") {
     g_cardName = value.substring(0, 40);
     g_prefs.putString("cName", g_cardName);
@@ -2389,6 +2567,18 @@ static void serviceAppLink() {
       g_infoEvents[1] = parts[2];
       g_infoExtra = parts[3];
       if (g_screen == SCREEN_HOME) markDirty(300);
+    } else if (c.cmd == 'J') {
+      String parts[3];
+      int part = 0;
+      for (size_t i = 0; i < text.length() && part < 3; i++) {
+        if (text[i] == '\n') part++;
+        else parts[part] += text[i];
+      }
+      for (int i = 0; i < 3; i++) g_infoMore[i] = parts[i];
+      if (g_screen == SCREEN_HOME || g_screen == SCREEN_TODAY) markDirty(300);
+    } else if (c.cmd == 'Q') {
+      g_quote = text;
+      if (g_screen == SCREEN_TODAY) markDirty(300);
     }
   }
 
@@ -2450,8 +2640,46 @@ int qrcodegen_getSize(const uint8_t qrcode[]);
 bool qrcodegen_getModule(const uint8_t qrcode[], int x, int y);
 }
 
-static const int TOOLS_COUNT = 9;
-static int g_toolsSel = 0;
+static const int TOOLS_COUNT = 11;
+static const int GAMES_COUNT = 7;
+static int g_toolsSel = 0, g_toolsTop = 0, g_gamesSel = 0;
+
+// Pomodoro: 25 minutes of work, then a 5 minute break, over and over.
+static int g_pomoPhase = 0;         // 0 not started, 1 work, 2 break
+static bool g_pomoRunning = false;
+static uint32_t g_pomoEndMs = 0;
+static int g_pomoLeftSec = 25 * 60, g_pomoDone = 0, g_pomoShownKey = -1;
+static bool g_pomoBlink = false;
+
+static int g_tally = 0;
+static int g_tipBill = 40, g_tipPercent = 20, g_tipPeople = 2, g_tipField = 0;
+static int g_convPair = 0, g_convValue = 10;
+static bool g_convReverse = false;
+static uint32_t g_findAtMs = 0;
+static bool g_findSent = false;
+static int g_morseAt = 0;
+static bool g_morseQuiz = false, g_morseShown = true;
+
+// Hangman
+static const char* const HANG_WORDS[] = {
+    "KEYCHAIN", "PAGER",   "BATTERY", "ROCKET",   "PUZZLE",  "GALAXY",  "WIZARD",   "JUNGLE",
+    "OXYGEN",   "RHYTHM",  "PIRATE",  "COFFEE",   "THUNDER", "LANTERN", "MAGNET",   "PYRAMID",
+    "COMPASS",  "ORCHARD", "WHISPER", "VOLCANO",  "BLANKET", "CACTUS",  "DOLPHIN",  "FOSSIL",
+    "GLACIER",  "HARBOR",  "ISLAND",  "JOURNEY",  "KITCHEN", "LIBRARY", "MONSOON",  "NEUTRON",
+    "OCTOPUS",  "PENGUIN", "QUARTZ",  "RAINBOW",  "SPHINX",  "TORNADO", "UMBRELLA", "VOYAGE",
+    "WALRUS",   "ZEPPELIN", "BISCUIT", "CHIMNEY", "DRAGON",  "ECLIPSE", "FALCON",   "GUITAR",
+    "HAMMOCK",  "IGLOO",   "JIGSAW",  "KAYAK",    "LOBSTER", "MAMMOTH", "NOODLE",   "OYSTER",
+};
+static const int HANG_COUNT = sizeof(HANG_WORDS) / sizeof(HANG_WORDS[0]);
+static const char* g_hangWord = nullptr;
+static uint32_t g_hangGuessed = 0;
+static int g_hangWrong = 0, g_hangLetter = 4, g_hangWins = 0;
+
+// Minesweeper: 13 x 6 squares, 12 mines.
+static const int MS_COLS = 13, MS_ROWS = 6, MS_CELL = 17, MS_MINES = 12;
+static uint8_t g_msCell[MS_COLS * MS_ROWS];  // bit 7 mine, bit 6 open, low bits = neighbours
+static int g_msX = 0, g_msY = 0, g_msState = 0;  // 0 not started, 1 playing, 2 lost, 3 won
+static bool g_msAcross = true;
 
 // Countdown timer
 static int g_timerSetSec = 300;
@@ -2504,7 +2732,10 @@ static uint32_t g_tScore = 0, g_tBest = 0;
 static bool g_tOver = false, g_tStarted = false;
 
 static bool isToolScreen() {
-  return g_screen == SCREEN_SNAKE || g_screen == SCREEN_2048 || g_screen == SCREEN_TOOLS || g_screen == SCREEN_TIMER || g_screen == SCREEN_STOPWATCH ||
+  return g_screen == SCREEN_GAMES || g_screen == SCREEN_POMO || g_screen == SCREEN_TALLY ||
+         g_screen == SCREEN_TIP || g_screen == SCREEN_CONVERT || g_screen == SCREEN_FIND ||
+         g_screen == SCREEN_MORSE || g_screen == SCREEN_HANGMAN || g_screen == SCREEN_MINES ||
+         g_screen == SCREEN_SNAKE || g_screen == SCREEN_2048 || g_screen == SCREEN_TOOLS || g_screen == SCREEN_TIMER || g_screen == SCREEN_STOPWATCH ||
          g_screen == SCREEN_REMOTE || g_screen == SCREEN_CARD || g_screen == SCREEN_ORACLE ||
          g_screen == SCREEN_DICE || g_screen == SCREEN_COIN;
 }
@@ -2550,19 +2781,296 @@ static String toolsLabel(int i) {
       if (g_timerRunning) return "Timer (" + clockFace(timerRemaining()) + " left)";
       return "Timer";
     case 1: return g_swRunning ? "Stopwatch (running)" : "Stopwatch";
-    case 2: return "Camera remote";
-    case 3: return "My card (QR code)";
-    case 4: return "Oracle";
-    case 5: return "Dice";
-    case 6: return "Coin flip";
-    case 7: return "Game: Snake";
-    default: return "Game: 2048";
+    case 2: return g_pomoRunning ? "Pomodoro (running)" : "Pomodoro";
+    case 3: return "Tally counter";
+    case 4: return "Tip and split";
+    case 5: return "Converter";
+    case 6: return "Find my phone";
+    case 7: return "Camera remote";
+    case 8: return "My card (QR code)";
+    case 9: return "Morse code";
+    default: return "Games";
   }
+}
+
+static String gamesLabel(int i) {
+  static const char* const NAMES[GAMES_COUNT] = {"Snake", "2048", "Hangman", "Minesweeper",
+                                                 "Oracle", "Dice", "Coin flip"};
+  return NAMES[i];
+}
+
+static bool isGameScreen() {
+  return g_screen == SCREEN_SNAKE || g_screen == SCREEN_2048 || g_screen == SCREEN_HANGMAN ||
+         g_screen == SCREEN_MINES || g_screen == SCREEN_ORACLE || g_screen == SCREEN_DICE ||
+         g_screen == SCREEN_COIN;
 }
 
 static void drawTools() {
   drawHeader("TOOLS", "EXIT = back");
-  drawRows(TOOLS_COUNT, g_toolsSel, 0, toolsLabel);
+  keepVisible(g_toolsSel, g_toolsTop);
+  drawRows(TOOLS_COUNT, g_toolsSel, g_toolsTop, toolsLabel);
+}
+
+static void drawGames() {
+  drawHeader("GAMES", "EXIT = back");
+  drawRows(GAMES_COUNT, g_gamesSel, 0, gamesLabel);
+}
+
+static int pomoRemaining() {
+  if (!g_pomoRunning) return g_pomoLeftSec;
+  int32_t ms = (int32_t)(g_pomoEndMs - millis());
+  return ms <= 0 ? 0 : (ms + 999) / 1000;
+}
+
+static void drawPomo() {
+  drawHeader("POMODORO", String(g_pomoDone) + " done");
+  if (g_pomoPhase == 0) {
+    drawMedium("25 minutes on, 5 off", 54);
+    drawHint("Press the wheel to start", 72);
+    return;
+  }
+  drawMedium(g_pomoPhase == 1 ? "Focus" : "Break", 34);
+  int left = pomoRemaining();
+  drawBig(left >= 60 ? String((left + 59) / 60) + " min" : String(left) + " sec", 78);
+  drawHint(g_pomoRunning ? "Press: pause     MENU: reset" : "Paused.  Press: go on     MENU: reset", 96);
+}
+
+static void drawTally() {
+  drawHeader("TALLY", "EXIT = back");
+  drawBig(String(g_tally), 70);
+  drawHint("Press or up: +1     Down: -1     MENU: zero", 96);
+}
+
+static String money(float amount) {
+  char text[16];
+  snprintf(text, sizeof(text), "$%.2f", amount);
+  return String(text);
+}
+
+static void drawTip() {
+  drawHeader("TIP AND SPLIT", "Press = next field");
+  g_canvas.setTextColor(1);
+  g_canvas.setFont(&FreeSansBold9pt7b);
+  const String fields[3] = {"Bill $" + String(g_tipBill), "Tip " + String(g_tipPercent) + "%",
+                            String(g_tipPeople) + (g_tipPeople == 1 ? " person" : " people")};
+  int x = 6;
+  for (int i = 0; i < 3; i++) {
+    int w = textWidth(fields[i]);
+    if (i == g_tipField) {
+      g_canvas.fillRect(x - 3, 20, w + 7, 20, 1);
+      g_canvas.setTextColor(0);
+    }
+    g_canvas.setCursor(x, 35);
+    g_canvas.print(fields[i]);
+    g_canvas.setTextColor(1);
+    x += w + 12;
+  }
+  float tip = g_tipBill * g_tipPercent / 100.0f;
+  float total = g_tipBill + tip;
+  g_canvas.setFont(&FreeSans9pt7b);
+  g_canvas.setCursor(6, 62);
+  g_canvas.print("Tip " + money(tip) + "   Total " + money(total));
+  g_canvas.setFont(&FreeSansBold9pt7b);
+  g_canvas.setCursor(6, 86);
+  g_canvas.print("Each pays " + money(total / g_tipPeople));
+  drawHint("Wheel changes the highlighted number", 104);
+}
+
+struct ConvPair {
+  const char* from;
+  const char* to;
+  float scale, offset;  // to = from * scale + offset
+};
+static const ConvPair CONV_PAIRS[] = {
+    {"mi", "km", 1.609344f, 0},  {"lb", "kg", 0.45359237f, 0}, {"F", "C", 5.0f / 9.0f, -160.0f / 9.0f},
+    {"in", "cm", 2.54f, 0},      {"ft", "m", 0.3048f, 0},      {"oz", "g", 28.349523f, 0},
+    {"gal", "L", 3.785412f, 0},  {"cup", "mL", 236.588f, 0},   {"mph", "km/h", 1.609344f, 0},
+};
+static const int CONV_COUNT = sizeof(CONV_PAIRS) / sizeof(CONV_PAIRS[0]);
+
+static void drawConvert() {
+  const ConvPair& pair = CONV_PAIRS[g_convPair];
+  drawHeader("CONVERTER", String(g_convPair + 1) + "/" + String(CONV_COUNT));
+  float out = g_convReverse ? (g_convValue - pair.offset) / pair.scale
+                            : g_convValue * pair.scale + pair.offset;
+  char text[24];
+  snprintf(text, sizeof(text), fabsf(out) >= 100 ? "%.1f" : "%.2f", out);
+  drawMedium(String(g_convValue) + " " + (g_convReverse ? pair.to : pair.from) + "  =", 40);
+  drawBig(String(text) + " " + (g_convReverse ? pair.from : pair.to), 82);
+  drawHint("Wheel: number   Press: next unit   MENU: swap", 100);
+}
+
+static void drawFind() {
+  drawHeader("FIND MY PHONE", "EXIT = back");
+  if (!g_findSent) {
+    drawMedium("Press the wheel", 54);
+    drawHint("and your phone will ring", 70);
+  } else if (!g_appListening) {
+    drawMedium("The app is not connected", 54);
+    drawHint("Open Inkfob on the phone once, then try again", 70);
+  } else {
+    drawMedium("Ringing your phone", 54);
+    drawHint("Press again to ring once more", 70);
+  }
+}
+
+static const char* const MORSE_CODES[36] = {
+    ".-",   "-...", "-.-.", "-..",  ".",     "..-.",  "--.",   "....",  "..",    ".---",  "-.-",  ".-..",
+    "--",   "-.",   "---",  ".--.", "--.-",  ".-.",   "...",   "-",     "..-",   "...-",  ".--",  "-..-",
+    "-.--", "--..", "-----", ".----", "..---", "...--", "....-", ".....", "-....", "--...", "---..", "----."};
+
+static void drawMorse() {
+  drawHeader("MORSE CODE", g_morseQuiz ? "quiz" : "chart");
+  char symbol = g_morseAt < 26 ? (char)('A' + g_morseAt) : (char)('0' + g_morseAt - 26);
+  drawBig(String(symbol), 56);
+  if (g_morseShown) {
+    String code;
+    for (const char* c = MORSE_CODES[g_morseAt]; *c; c++) code += (*c == '.') ? "o " : "=== ";
+    code.trim();
+    drawMedium(MORSE_CODES[g_morseAt], 78);
+    drawHint(code, 86);
+  } else {
+    drawMedium("?", 78);
+  }
+  drawHint(g_morseQuiz ? "Press: show, then next     MENU: chart" : "Wheel: browse     MENU: quiz me", 104);
+}
+
+static void hangStart() {
+  g_hangWord = HANG_WORDS[esp_random() % HANG_COUNT];
+  g_hangGuessed = 0;
+  g_hangWrong = 0;
+}
+
+static bool hangSolved() {
+  for (const char* c = g_hangWord; *c; c++) {
+    if (!(g_hangGuessed & (1u << (*c - 'A')))) return false;
+  }
+  return true;
+}
+
+static void drawHangman() {
+  drawHeader("HANGMAN", String(g_hangWins) + " won");
+  g_canvas.setTextColor(1);
+  if (!g_hangWord) hangStart();
+  // gallows
+  g_canvas.drawFastHLine(8, 104, 44, 1);
+  g_canvas.drawFastVLine(18, 22, 82, 1);
+  g_canvas.drawFastHLine(18, 22, 28, 1);
+  g_canvas.drawFastVLine(46, 22, 8, 1);
+  if (g_hangWrong > 0) g_canvas.drawCircle(46, 37, 7, 1);
+  if (g_hangWrong > 1) g_canvas.drawFastVLine(46, 44, 26, 1);
+  if (g_hangWrong > 2) g_canvas.drawLine(46, 50, 36, 62, 1);
+  if (g_hangWrong > 3) g_canvas.drawLine(46, 50, 56, 62, 1);
+  if (g_hangWrong > 4) g_canvas.drawLine(46, 70, 37, 86, 1);
+  if (g_hangWrong > 5) g_canvas.drawLine(46, 70, 55, 86, 1);
+  bool lost = g_hangWrong >= 6, won = hangSolved();
+  String shown;
+  for (const char* c = g_hangWord; *c; c++) {
+    bool known = lost || (g_hangGuessed & (1u << (*c - 'A')));
+    shown += known ? *c : '_';
+    shown += ' ';
+  }
+  shown.trim();
+  g_canvas.setFont(&FreeSansBold9pt7b);
+  g_canvas.setCursor(70, 44);
+  g_canvas.print(shown);
+  g_canvas.setFont(nullptr);
+  g_canvas.setTextSize(1);
+  if (lost || won) {
+    g_canvas.setCursor(70, 62);
+    g_canvas.print(won ? "You got it!" : "Out of guesses.");
+    g_canvas.setCursor(70, 76);
+    g_canvas.print("Press: new word");
+    return;
+  }
+  String missed;
+  for (int i = 0; i < 26; i++) {
+    bool inWord = strchr(g_hangWord, 'A' + i) != nullptr;
+    if ((g_hangGuessed & (1u << i)) && !inWord) missed += (char)('A' + i);
+  }
+  g_canvas.setCursor(70, 58);
+  g_canvas.print("Missed: " + missed);
+  g_canvas.setFont(&FreeSansBold9pt7b);
+  g_canvas.setCursor(70, 84);
+  g_canvas.print("Guess:  < " + String((char)('A' + g_hangLetter)) + " >");
+  drawHint("Wheel: letter   Press: guess", 104);
+}
+
+static void minesStart(int safeX, int safeY) {
+  memset(g_msCell, 0, sizeof(g_msCell));
+  int placed = 0;
+  while (placed < MS_MINES) {
+    int x = (int)(esp_random() % MS_COLS), y = (int)(esp_random() % MS_ROWS);
+    if (abs(x - safeX) <= 1 && abs(y - safeY) <= 1) continue;  // the first square is always clear
+    if (g_msCell[y * MS_COLS + x] & 0x80) continue;
+    g_msCell[y * MS_COLS + x] |= 0x80;
+    placed++;
+  }
+  for (int y = 0; y < MS_ROWS; y++) {
+    for (int x = 0; x < MS_COLS; x++) {
+      int n = 0;
+      for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+          int nx = x + dx, ny = y + dy;
+          if (nx >= 0 && ny >= 0 && nx < MS_COLS && ny < MS_ROWS && (g_msCell[ny * MS_COLS + nx] & 0x80)) n++;
+        }
+      }
+      g_msCell[y * MS_COLS + x] |= (uint8_t)(n & 0x0F);
+    }
+  }
+  g_msState = 1;
+}
+
+static void minesOpen(int startX, int startY) {
+  static uint8_t stack[MS_COLS * MS_ROWS];
+  int depth = 0;
+  stack[depth++] = (uint8_t)(startY * MS_COLS + startX);
+  while (depth > 0) {
+    int at = stack[--depth];
+    if (g_msCell[at] & 0x40) continue;
+    g_msCell[at] |= 0x40;
+    if ((g_msCell[at] & 0x8F) != 0) continue;  // only empty squares spread
+    int x = at % MS_COLS, y = at / MS_COLS;
+    for (int dy = -1; dy <= 1; dy++) {
+      for (int dx = -1; dx <= 1; dx++) {
+        int nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= MS_COLS || ny >= MS_ROWS) continue;
+        int next = ny * MS_COLS + nx;
+        if (!(g_msCell[next] & 0x40) && depth < (int)sizeof(stack)) stack[depth++] = (uint8_t)next;
+      }
+    }
+  }
+}
+
+static void drawMines() {
+  int closed = 0;
+  for (int i = 0; i < MS_COLS * MS_ROWS; i++) closed += (g_msCell[i] & 0x40) ? 0 : 1;
+  String right = g_msState == 2 ? "Boom! Press: again" : g_msState == 3 ? "Cleared! Press: again"
+               : String(g_msAcross ? "wheel: across" : "wheel: up/down") + "  MENU: turn";
+  drawHeader("MINES", right);
+  g_canvas.setFont(nullptr);
+  g_canvas.setTextSize(1);
+  const int ox = (EPD_WIDTH - MS_COLS * MS_CELL) / 2, oy = HEADER_H + 3;
+  for (int y = 0; y < MS_ROWS; y++) {
+    for (int x = 0; x < MS_COLS; x++) {
+      uint8_t cell = g_msCell[y * MS_COLS + x];
+      int px = ox + x * MS_CELL, py = oy + y * MS_CELL;
+      bool open = (cell & 0x40) || (g_msState >= 2 && (cell & 0x80));
+      if (!open) {
+        g_canvas.fillRect(px + 1, py + 1, MS_CELL - 2, MS_CELL - 2, 1);
+      } else {
+        g_canvas.drawRect(px + 1, py + 1, MS_CELL - 2, MS_CELL - 2, 1);
+        g_canvas.setTextColor(1);
+        g_canvas.setCursor(px + 6, py + 5);
+        if (cell & 0x80) g_canvas.print("*");
+        else if (cell & 0x0F) g_canvas.print(String(cell & 0x0F));
+      }
+      if (x == g_msX && y == g_msY && g_msState < 2) {
+        g_canvas.drawRect(px + 3, py + 3, MS_CELL - 6, MS_CELL - 6, open ? 1 : 0);
+        g_canvas.drawRect(px + 4, py + 4, MS_CELL - 8, MS_CELL - 8, open ? 1 : 0);
+      }
+    }
+  }
 }
 
 static void snakeFood() {
@@ -2926,23 +3434,153 @@ static bool onToolPress(int pin) {
   if (g_screen == SCREEN_TOOLS) {
     if (pin == PIN_UP && g_toolsSel > 0) g_toolsSel--;
     if (pin == PIN_DOWN && g_toolsSel < TOOLS_COUNT - 1) g_toolsSel++;
+    if (pin == PIN_CLICK && g_toolsSel == 6) g_findSent = false;
     if (pin == PIN_EXIT) {
       openMainMenu();
       g_menuSel = 3;
     }
     if (pin == PIN_MENU) g_screen = SCREEN_HOME;
     if (pin == PIN_CLICK) {
-      static const Screen TARGETS[TOOLS_COUNT] = {SCREEN_TIMER, SCREEN_STOPWATCH, SCREEN_REMOTE,
-                                                  SCREEN_CARD,  SCREEN_ORACLE,    SCREEN_DICE,
-                                                  SCREEN_COIN,  SCREEN_SNAKE,     SCREEN_2048};
+      static const Screen TARGETS[TOOLS_COUNT] = {
+          SCREEN_TIMER, SCREEN_STOPWATCH, SCREEN_POMO, SCREEN_TALLY, SCREEN_TIP,  SCREEN_CONVERT,
+          SCREEN_FIND,  SCREEN_REMOTE,    SCREEN_CARD, SCREEN_MORSE, SCREEN_GAMES};
       g_screen = TARGETS[g_toolsSel];
+    }
+    return true;
+  }
+  if (g_screen == SCREEN_GAMES) {
+    if (pin == PIN_UP && g_gamesSel > 0) g_gamesSel--;
+    if (pin == PIN_DOWN && g_gamesSel < GAMES_COUNT - 1) g_gamesSel++;
+    if (pin == PIN_EXIT) g_screen = SCREEN_TOOLS;
+    if (pin == PIN_MENU) g_screen = SCREEN_HOME;
+    if (pin == PIN_CLICK) {
+      static const Screen TARGETS[GAMES_COUNT] = {SCREEN_SNAKE,  SCREEN_2048, SCREEN_HANGMAN,
+                                                  SCREEN_MINES,  SCREEN_ORACLE, SCREEN_DICE,
+                                                  SCREEN_COIN};
+      g_screen = TARGETS[g_gamesSel];
     }
     return true;
   }
   if (pin == PIN_EXIT && !(g_screen == SCREEN_TIMER && g_timerDone)) {
     if (g_screen == SCREEN_SNAKE && g_snAlive) g_snPaused = true;
-    g_screen = SCREEN_TOOLS;
+    if (g_screen == SCREEN_TALLY) g_prefs.putInt("tally", g_tally);
+    g_screen = isGameScreen() ? SCREEN_GAMES : SCREEN_TOOLS;
     g_forceFull = true;
+    return true;
+  }
+
+  if (g_screen == SCREEN_POMO) {
+    if (pin == PIN_CLICK) {
+      if (g_pomoPhase == 0) {
+        g_pomoPhase = 1;
+        g_pomoLeftSec = 25 * 60;
+      }
+      if (g_pomoRunning) {
+        g_pomoLeftSec = pomoRemaining();
+        g_pomoRunning = false;
+      } else {
+        g_pomoEndMs = millis() + (uint32_t)g_pomoLeftSec * 1000;
+        g_pomoRunning = true;
+      }
+    }
+    if (pin == PIN_MENU) {
+      g_pomoPhase = 0;
+      g_pomoRunning = false;
+      g_pomoLeftSec = 25 * 60;
+    }
+    return true;
+  }
+  if (g_screen == SCREEN_TALLY) {
+    if (pin == PIN_CLICK || pin == PIN_UP) g_tally++;
+    if (pin == PIN_DOWN && g_tally > 0) g_tally--;
+    if (pin == PIN_MENU) g_tally = 0;
+    return true;
+  }
+  if (g_screen == SCREEN_TIP) {
+    int step = (pin == PIN_UP) ? 1 : (pin == PIN_DOWN) ? -1 : 0;
+    if (pin == PIN_CLICK) g_tipField = (g_tipField + 1) % 3;
+    if (g_tipField == 0) g_tipBill = constrain(g_tipBill + step, 1, 999);
+    if (g_tipField == 1) g_tipPercent = constrain(g_tipPercent + step, 0, 40);
+    if (g_tipField == 2) g_tipPeople = constrain(g_tipPeople + step, 1, 20);
+    return pin != PIN_MENU;
+  }
+  if (g_screen == SCREEN_CONVERT) {
+    if (pin == PIN_UP) g_convValue = min(g_convValue + 1, 9999);
+    if (pin == PIN_DOWN) g_convValue = max(g_convValue - 1, -99);
+    if (pin == PIN_CLICK) g_convPair = (g_convPair + 1) % CONV_COUNT;
+    if (pin == PIN_MENU) g_convReverse = !g_convReverse;
+    return true;
+  }
+  if (g_screen == SCREEN_FIND) {
+    if (pin == PIN_CLICK) {
+      g_findSent = true;
+      if (g_appListening) appNotifyText('B', "");
+    }
+    return pin == PIN_CLICK;
+  }
+  if (g_screen == SCREEN_MORSE) {
+    if (pin == PIN_MENU) {
+      g_morseQuiz = !g_morseQuiz;
+      g_morseShown = !g_morseQuiz;
+      if (g_morseQuiz) g_morseAt = (int)(esp_random() % 36);
+    } else if (g_morseQuiz) {
+      if (pin == PIN_CLICK) {
+        if (g_morseShown) g_morseAt = (int)(esp_random() % 36);
+        g_morseShown = !g_morseShown;
+      }
+    } else {
+      if (pin == PIN_DOWN || pin == PIN_CLICK) g_morseAt = (g_morseAt + 1) % 36;
+      if (pin == PIN_UP) g_morseAt = (g_morseAt + 35) % 36;
+    }
+    return true;
+  }
+  if (g_screen == SCREEN_HANGMAN) {
+    if (!g_hangWord) hangStart();
+    bool over = g_hangWrong >= 6 || hangSolved();
+    if (over) {
+      if (pin == PIN_CLICK) hangStart();
+      return pin == PIN_CLICK;
+    }
+    if (pin == PIN_UP || pin == PIN_DOWN) {
+      // skip letters that have been tried already
+      for (int tries = 0; tries < 26; tries++) {
+        g_hangLetter = (g_hangLetter + (pin == PIN_DOWN ? 1 : 25)) % 26;
+        if (!(g_hangGuessed & (1u << g_hangLetter))) break;
+      }
+    }
+    if (pin == PIN_CLICK && !(g_hangGuessed & (1u << g_hangLetter))) {
+      g_hangGuessed |= (1u << g_hangLetter);
+      if (!strchr(g_hangWord, 'A' + g_hangLetter)) g_hangWrong++;
+      else if (hangSolved()) g_hangWins++;
+    }
+    return pin != PIN_MENU;
+  }
+  if (g_screen == SCREEN_MINES) {
+    if (pin == PIN_MENU) {
+      g_msAcross = !g_msAcross;
+      return true;
+    }
+    if (g_msState >= 2) {
+      if (pin == PIN_CLICK) {
+        memset(g_msCell, 0, sizeof(g_msCell));
+        g_msState = 0;
+      }
+      return pin == PIN_CLICK;
+    }
+    int step = (pin == PIN_DOWN) ? 1 : (pin == PIN_UP) ? -1 : 0;
+    if (g_msAcross) g_msX = (g_msX + step + MS_COLS) % MS_COLS;
+    else g_msY = (g_msY + step + MS_ROWS) % MS_ROWS;
+    if (pin == PIN_CLICK) {
+      if (g_msState == 0) minesStart(g_msX, g_msY);
+      if (g_msCell[g_msY * MS_COLS + g_msX] & 0x80) {
+        g_msState = 2;
+      } else {
+        minesOpen(g_msX, g_msY);
+        int closed = 0;
+        for (int i = 0; i < MS_COLS * MS_ROWS; i++) closed += (g_msCell[i] & 0x40) ? 0 : 1;
+        if (closed == MS_MINES) g_msState = 3;
+      }
+    }
     return true;
   }
 
@@ -3076,6 +3714,33 @@ static void serviceTools() {
       markDirty(1);
     }
   }
+  if (g_pomoRunning && pomoRemaining() == 0) {
+    // one phase ends and the other begins
+    if (g_pomoPhase == 1) g_pomoDone++;
+    g_pomoPhase = (g_pomoPhase == 1) ? 2 : 1;
+    g_pomoLeftSec = (g_pomoPhase == 1) ? 25 * 60 : 5 * 60;
+    g_pomoEndMs = millis() + (uint32_t)g_pomoLeftSec * 1000;
+    g_timerDoneAtMs = millis();
+    g_timerBlinking = true;
+    g_timerDone = true;   // borrows the timer's light: it blinks for a few seconds
+    g_pomoBlink = true;
+    g_lastActivityMs = millis();
+    g_screen = SCREEN_POMO;
+    g_forceFull = true;
+    markDirty(0);
+  }
+  if (g_pomoBlink && millis() - g_timerDoneAtMs > 6000) {
+    g_pomoBlink = false;
+    g_timerDone = false;
+  }
+  if (g_screen == SCREEN_POMO && g_pomoRunning) {
+    int left = pomoRemaining();
+    int key = (left > 60) ? 100000 + (left + 59) / 60 : left / 5;
+    if (key != g_pomoShownKey) {
+      g_pomoShownKey = key;
+      markDirty(1);
+    }
+  }
   if (g_screen == SCREEN_SNAKE && g_snAlive && !g_snPaused &&
       (int32_t)(millis() - g_snNextMs) >= 0) {
     g_snNextMs = millis() + SN_STEP_MS;
@@ -3114,13 +3779,26 @@ static void render() {
     case SCREEN_FILES: drawFiles(); break;
     case SCREEN_NOTE: drawNote(); break;
     case SCREEN_UPDATE: drawUpdate(); break;
+    case SCREEN_TODAY: drawToday(); break;
+    case SCREEN_DECK: drawDeck(); break;
+    case SCREEN_GAMES: drawGames(); break;
+    case SCREEN_POMO: drawPomo(); break;
+    case SCREEN_TALLY: drawTally(); break;
+    case SCREEN_TIP: drawTip(); break;
+    case SCREEN_CONVERT: drawConvert(); break;
+    case SCREEN_FIND: drawFind(); break;
+    case SCREEN_MORSE: drawMorse(); break;
+    case SCREEN_HANGMAN: drawHangman(); break;
+    case SCREEN_MINES: drawMines(); break;
     case SCREEN_SNAKE: drawSnake(); break;
     case SCREEN_2048: draw2048(); break;
     default: drawList(); break;
   }
   // A ticking timer would otherwise flash every half minute.
   bool ticking = (g_screen == SCREEN_TIMER || g_screen == SCREEN_STOPWATCH ||
-                  g_screen == SCREEN_SNAKE || g_screen == SCREEN_2048);
+                  g_screen == SCREEN_SNAKE || g_screen == SCREEN_2048 ||
+                  g_screen == SCREEN_MINES || g_screen == SCREEN_HANGMAN ||
+                  g_screen == SCREEN_TIP || g_screen == SCREEN_CONVERT || g_screen == SCREEN_TALLY);
   bool full = g_forceFull || !g_fastRefresh || g_fastCount >= (ticking ? 150 : 30);
   Epd::show(g_canvas.getBuffer(), full);
   g_fastCount = full ? 0 : g_fastCount + 1;
@@ -3352,7 +4030,27 @@ static void openMainMenu() {
 }
 
 static void onPress(int pin) {
-  if (g_screen == SCREEN_MENU) {
+  if (g_screen == SCREEN_TODAY) {
+    if (pin == PIN_MENU) {
+      openMainMenu();
+      g_menuSel = 6;
+    } else {
+      g_screen = SCREEN_HOME;
+    }
+  } else if (g_screen == SCREEN_DECK) {
+    int count = (int)g_deckLines.size();
+    if (pin == PIN_CLICK) g_deckBack = !g_deckBack;
+    if (pin == PIN_DOWN) {
+      g_deckAt = (g_deckAt + 1) % count;
+      g_deckBack = false;
+    }
+    if (pin == PIN_UP) {
+      g_deckAt = (g_deckAt + count - 1) % count;
+      g_deckBack = false;
+    }
+    if (pin == PIN_EXIT) g_screen = SCREEN_FILES;
+    if (pin == PIN_MENU) g_screen = SCREEN_HOME;
+  } else if (g_screen == SCREEN_MENU) {
     if (pin == PIN_UP && g_menuSel > 0) g_menuSel--;
     if (pin == PIN_DOWN && g_menuSel < MAIN_MENU_COUNT - 1) g_menuSel++;
     if (pin == PIN_EXIT || pin == PIN_MENU) g_screen = SCREEN_HOME;
@@ -3369,7 +4067,8 @@ static void onPress(int pin) {
         refreshFileList();
         g_screen = SCREEN_FILES;
       }
-      if (g_menuSel == 6) {
+      if (g_menuSel == 6) g_screen = SCREEN_TODAY;
+      if (g_menuSel == 7) {
         g_screen = SCREEN_HOME;
         enterSleep(true);  // does not return
       }
@@ -3458,7 +4157,13 @@ static void onPress(int pin) {
     int count = (int)g_fileNames.size();
     if (pin == PIN_UP && g_fileSel > 0) g_fileSel--;
     if (pin == PIN_DOWN && g_fileSel < count - 1) g_fileSel++;
-    if (pin == PIN_CLICK && count > 0 && openNote(g_fileNames[g_fileSel])) g_screen = SCREEN_NOTE;
+    if (pin == PIN_CLICK && count > 0) {
+      if (g_fileNames[g_fileSel].endsWith(".cards")) {
+        if (openDeck(g_fileNames[g_fileSel])) g_screen = SCREEN_DECK;
+      } else if (openNote(g_fileNames[g_fileSel])) {
+        g_screen = SCREEN_NOTE;
+      }
+    }
     if (pin == PIN_MENU || pin == PIN_EXIT) {
       openMainMenu();
       g_menuSel = 5;
@@ -3730,6 +4435,13 @@ void setup() {
   if (g_sleepChoice >= SLEEP_CHOICES) g_sleepChoice = 0;
   if (g_checkChoice >= CHECK_CHOICES) g_checkChoice = 2;
   g_sleepFace = g_prefs.getUChar("sleepFace", 0) ? 1 : 0;
+  g_tally = g_prefs.getInt("tally", 0);
+  {
+    String corners = g_prefs.getString("corners", "1236");
+    for (int i = 0; i < 4 && i < (int)corners.length(); i++) {
+      g_corners[i] = (uint8_t)constrain(corners[i] - '0', 0, 9);
+    }
+  }
   g_snBest = g_prefs.getInt("snBest", 0);
   g_tBest = g_prefs.getUInt("t48Best", 0);
   g_face = g_prefs.getUChar("homeFace", 0);
@@ -3801,7 +4513,10 @@ void loop() {
   }
   g_repeatOk = !g_dirty && (g_screen == SCREEN_MENU || g_screen == SCREEN_LIST ||
                             g_screen == SCREEN_LIBRARY || g_screen == SCREEN_SETTINGS ||
-                            g_screen == SCREEN_TOOLS || g_screen == SCREEN_FILES);
+                            g_screen == SCREEN_TOOLS || g_screen == SCREEN_FILES ||
+                            g_screen == SCREEN_GAMES || g_screen == SCREEN_TIP ||
+                            g_screen == SCREEN_CONVERT || g_screen == SCREEN_HANGMAN ||
+                            g_screen == SCREEN_MINES || g_screen == SCREEN_MORSE);
   serviceTools();
   serviceIdle();
   if (g_dirty && (int32_t)(millis() - g_dirtyAtMs) >= 0) {

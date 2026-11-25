@@ -5,6 +5,7 @@ struct FilesView: View {
     @EnvironmentObject var link: PagerLink
     @State private var writing = false
     @State private var importing = false
+    @State private var makingDeck = false
     @State private var message = ""
 
     /// The photo face is stored as a file too, but it is not something to read.
@@ -22,8 +23,10 @@ struct FilesView: View {
                 Section {
                     Button { writing = true } label: { Label("Write a note", systemImage: "square.and.pencil") }
                     Button { importing = true } label: { Label("Send a text file or book", systemImage: "tray.and.arrow.down") }
+                    Button { makingDeck = true } label: { Label("Make a flashcard deck", systemImage: "rectangle.on.rectangle") }
+                    NavigationLink { LibraryView() } label: { Label("Get a free book", systemImage: "books.vertical") }
                 } footer: {
-                    Text("Plain text (.txt) works best. Files appear on the pager under Menu > My files.")
+                    Text("Plain text (.txt) works best. Files appear on the pager under Menu > My files. Flashcard decks open as cards.")
                 }
                 .disabled(!link.isReady || link.transferActive)
                 Section("On the pager") {
@@ -54,6 +57,9 @@ struct FilesView: View {
             .refreshable { link.requestFiles() }
             .sheet(isPresented: $writing) {
                 NoteEditor { name, text in send(name: name, text: text) }
+            }
+            .sheet(isPresented: $makingDeck) {
+                DeckEditor { name, text in send(name: String(name.prefix(24)) + ".cards", text: text) }
             }
             .fileImporter(isPresented: $importing, allowedContentTypes: [.plainText, .text]) { result in
                 guard case .success(let url) = result else { return }
