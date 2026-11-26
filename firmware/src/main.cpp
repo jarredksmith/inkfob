@@ -104,7 +104,7 @@ struct PendingFetch {
   bool preexisting;  // was already on the phone before the pager connected
 };
 
-static const char* const FIRMWARE_VERSION = "v2.2";
+static const char* const FIRMWARE_VERSION = "v2.3";
 
 // One write to the phone's control point, carried out by the Bluetooth task.
 struct BleRequest {
@@ -288,6 +288,8 @@ static uint32_t g_dirtySinceMs = 0;  // when the screen first became out of date
 static bool g_dirtyUrgent = false;   // a button was pressed: redraw straight away
 static uint8_t g_fastCount = 0;
 static bool g_forceFull = true;
+static uint8_t g_readTurn = 0;               // 0 wide, 1 tall, 2 tall the other way up
+static const char* const READ_NAMES[] = {"Wide", "Tall", "Tall, flipped"};
 
 static Preferences g_prefs;
 static bool g_flip = false;
@@ -810,6 +812,7 @@ static String settingsText() {
   s += "home=" + String((int)g_face) + "\n";
   s += "popup=" + String((int)g_popupChoice) + "\n";
   s += "btn2=" + String(g_twoButton ? 1 : 0) + "\n";
+  s += "read=" + String((int)g_readTurn) + "\n";
   s += "corners=";
   for (int i = 0; i < 4; i++) s += String((int)g_corners[i]);
   s += "\n";
@@ -2233,7 +2236,7 @@ static void drawDetail() {
   }
 }
 
-static const int SETTINGS_COUNT = 13;
+static const int SETTINGS_COUNT = 14;
 
 static String minutesLabel(int minutes) {
   if (minutes >= 60) return String(minutes / 60) + (minutes == 60 ? " hour" : " hours");
@@ -2263,8 +2266,9 @@ static String settingsLabel(int i) {
       return String("Alerts stay: ") + (seconds < 60 ? String(seconds) + " sec" : minutesLabel(seconds / 60));
     }
     case 9: return String("Controls: ") + (g_twoButton ? "Two buttons" : "Wheel");
-    case 10: return "Status";
-    case 11: return "Clear list";
+    case 10: return String("Reading: ") + READ_NAMES[g_readTurn];
+    case 11: return "Status";
+    case 12: return "Clear list";
     default: return "Forget phone";
   }
 }
@@ -2380,6 +2384,38 @@ static File g_noteFile;
 static String g_noteName;
 static std::vector<uint32_t> g_notePages;   // where each page starts in the file
 static int g_notePage = 0;
+static uint32_t g_noteSize = 0;              // what the page list was worked out for
+static uint16_t g_noteLayout = 0;
+
+// Reads a file through a small buffer: one character at a time straight from
+// storage is what made big books slow to open.
+struct NoteSrc {
+  File* f = nullptr;
+  uint8_t buf[512];
+  uint32_t base = 0;
+  int len = 0;
+  int at = 0;
+  void open(File& file, uint32_t pos) { f = &file; base = pos; len = 0; at = 0; }
+  uint32_t position() const { return base + at; }
+  bool available() {
+    if (at < len) return true;
+    base += len;
+    at = 0;
+    f->seek(base);
+    len = (int)f->read(buf, sizeof(buf));
+    if (len < 0) len = 0;
+    return len > 0;
+  }
+  int read() { return available() ? buf[at++] : -1; }
+  void seek(uint32_t pos) {
+    if (pos >= base && pos <= base + (uint32_t)len) { at = (int)(pos - base); return; }
+    base = pos; len = 0; at = 0;
+  }
+};
+static NoteSrc g_noteSrc;
+
+static int noteCols() { return g_readTurn ? 19 : 40; }
+static int noteRows() { return g_readTurn ? (EPD_WIDTH - HEADER_H - 6) / 10 : 10; }
 
 static void refreshFileList() {
   g_fileNames.clear();
@@ -2462,8 +2498,8 @@ static bool photoReady() {
   return g_photoOk;
 }
 
-// Reads the next screen line (up to 40 characters, broken at a space).
-static bool noteNextLine(File& f, char* out) {
+// Reads the next screen line (up to `cols` characters, broken at a space).
+static bool noteNextLine(NoteSrc& f, char* out, int cols) {
   int n = 0;
   int lastSpace = -1;
   uint32_t afterSpace = 0;
@@ -2475,7 +2511,7 @@ static bool noteNextLine(File& f, char* out) {
     if (c == '\n') break;
     if (c == '\t') c = ' ';
     if (c < 32 || c > 126) c = '?';
-    if (n == 40) {
+    if (n == cols) {
       if (c == ' ') break;
       if (lastSpace > 0) {
         f.seek(afterSpace);
@@ -2503,25 +2539,86 @@ static String noteKey(const String& name) {
   return String(key);
 }
 
+static String noteSpotKey(const String& name) {
+  String key = noteKey(name);
+  key[0] = 'o';
+  return key;
+}
+
+// Shown while a big file is being split into pages, so it does not look frozen.
+static void showOpening(const String& name, int percent) {
+  g_canvas.fillScreen(0);
+  drawHeader("OPENING", String(percent) + "%");
+  g_canvas.setTextColor(1);
+  drawSmallCentered(name.substring(0, 38), 44);
+  int w = EPD_WIDTH - 60;
+  g_canvas.drawRect(30, 62, w, 14, 1);
+  g_canvas.fillRect(32, 64, (w - 4) * percent / 100, 10, 1);
+  drawSmallCentered("Working out the pages...", 92);
+  Epd::show(g_canvas.getBuffer(), false);
+  g_fastCount++;
+}
+
+static void saveNoteSpot() {
+  if (g_noteName.length() && g_notePage < (int)g_notePages.size())
+    g_prefs.putUInt(noteSpotKey(g_noteName).c_str(), g_notePages[g_notePage]);
+}
+
 static bool openNote(const String& name) {
   if (g_noteFile) g_noteFile.close();
   g_noteFile = LittleFS.open("/" + name, "r");
   if (!g_noteFile) return false;
+  int cols = noteCols();
+  int rows = noteRows();
+  uint32_t size = g_noteFile.size();
+  uint16_t layout = (uint16_t)(cols << 8 | rows);
+  bool known = name == g_noteName && size == g_noteSize && layout == g_noteLayout &&
+               !g_notePages.empty();
   g_noteName = name;
-  g_notePages.clear();
-  char line[41];
-  int lines = 0;
-  uint32_t at = 0;
-  while (true) {
-    if (lines % 10 == 0) at = g_noteFile.position();
-    if (!noteNextLine(g_noteFile, line)) break;
-    if (lines % 10 == 0) g_notePages.push_back(at);
-    lines++;
+  if (!known) {
+    stayAwake(true);
+    g_notePages.clear();
+    bool big = size > 30000;
+    uint32_t shownAt = millis();
+    if (big) showOpening(name, 0);
+    char line[41];
+    int lines = 0;
+    uint32_t at = 0;
+    g_noteSrc.open(g_noteFile, 0);
+    while (true) {
+      if (lines % rows == 0) at = g_noteSrc.position();
+      if (!noteNextLine(g_noteSrc, line, cols)) break;
+      if (lines % rows == 0) g_notePages.push_back(at);
+      lines++;
+      if (big && (lines & 255) == 0 && millis() - shownAt > 1500) {
+        showOpening(name, (int)((uint64_t)at * 100 / size));
+        shownAt = millis();
+      }
+    }
+    if (g_notePages.empty()) g_notePages.push_back(0);
+    g_noteSize = size;
+    g_noteLayout = layout;
   }
-  if (g_notePages.empty()) g_notePages.push_back(0);
-  g_notePage = g_prefs.getInt(noteKey(name).c_str(), 0);
+  // The place is kept as a spot in the file, so it survives a change of layout.
+  String spotKey = noteSpotKey(name);
+  g_notePage = 0;
+  if (g_prefs.isKey(spotKey.c_str())) {
+    uint32_t spot = g_prefs.getUInt(spotKey.c_str(), 0);
+    for (int i = 0; i < (int)g_notePages.size() && g_notePages[i] <= spot; i++) g_notePage = i;
+  } else if (!g_readTurn) {
+    g_notePage = g_prefs.getInt(noteKey(name).c_str(), 0);   // saved by older firmware
+  }
   if (g_notePage >= (int)g_notePages.size()) g_notePage = 0;
   return true;
+}
+
+// The reading layout changed: split the open file into pages again.
+static void setReadTurn(uint8_t turn) {
+  if (g_screen == SCREEN_NOTE) saveNoteSpot();
+  g_readTurn = turn % 3;
+  g_prefs.putUChar("readTurn", g_readTurn);
+  if (g_screen == SCREEN_NOTE && g_noteName.length()) openNote(String(g_noteName));
+  g_forceFull = true;
 }
 
 static String fileLabel(int i) { return g_fileNames[i]; }
@@ -2538,17 +2635,46 @@ static void drawFiles() {
   drawRows((int)g_fileNames.size(), g_fileSel, g_fileTop, fileLabel);
 }
 
+// Tall layout: the same page drawn with the screen turned on its side.
+static void drawNoteTall() {
+  g_canvas.setRotation(g_readTurn == 2 ? 3 : 1);
+  int w = g_canvas.width();
+  int cols = noteCols();
+  String right = String(g_notePage + 1) + "/" + String((int)g_notePages.size());
+  g_canvas.fillRect(0, 0, w, HEADER_H, 1);
+  g_canvas.setFont(nullptr);
+  g_canvas.setTextSize(1);
+  g_canvas.setTextColor(0);
+  g_canvas.setCursor(3, 3);
+  g_canvas.print(g_noteName.substring(0, max(0, cols - (int)right.length() - 1)));
+  g_canvas.setCursor(w - 3 - (int)right.length() * 6, 3);
+  g_canvas.print(right);
+  g_canvas.setTextColor(1);
+  if (g_noteFile) {
+    g_noteSrc.open(g_noteFile, g_notePages[g_notePage]);
+    char line[41];
+    int rows = noteRows();
+    for (int i = 0; i < rows; i++) {
+      if (!noteNextLine(g_noteSrc, line, cols)) break;
+      g_canvas.setCursor(4, HEADER_H + 4 + i * 10);
+      g_canvas.print(line);
+    }
+  }
+  g_canvas.setRotation(0);
+}
+
 static void drawNote() {
+  if (g_readTurn) { drawNoteTall(); return; }
   String right = String(g_notePage + 1) + "/" + String((int)g_notePages.size());
   drawHeader(g_noteName.substring(0, 39 - (int)right.length() - 1), right);
   g_canvas.setFont(nullptr);
   g_canvas.setTextSize(1);
   g_canvas.setTextColor(1);
   if (!g_noteFile) return;
-  g_noteFile.seek(g_notePages[g_notePage]);
+  g_noteSrc.open(g_noteFile, g_notePages[g_notePage]);
   char line[41];
   for (int i = 0; i < 10; i++) {
-    if (!noteNextLine(g_noteFile, line)) break;
+    if (!noteNextLine(g_noteSrc, line, 40)) break;
     g_canvas.setCursor(5, HEADER_H + 5 + i * 10);
     g_canvas.print(line);
   }
@@ -2599,6 +2725,8 @@ static void applyAppSetting(const String& pair) {
   } else if (key == "btn2") {
     g_twoButton = number != 0;
     g_prefs.putBool("twoButton", g_twoButton);
+  } else if (key == "read" && number >= 0 && number < 3) {
+    setReadTurn((uint8_t)number);
   } else if (key == "popup" && number >= 0 && number < POPUP_CHOICES) {
     g_popupChoice = (uint8_t)number;
     g_prefs.putUChar("popupSel", g_popupChoice);
@@ -4072,9 +4200,12 @@ static void onSettingsSelect() {
       g_prefs.putBool("twoButton", g_twoButton);
       break;
     case 10:
-      g_screen = SCREEN_STATUS;
+      setReadTurn(g_readTurn + 1);
       break;
     case 11:
+      g_screen = SCREEN_STATUS;
+      break;
+    case 12:
       g_notes.clear();
       g_sel = 0;
       g_listTop = 0;
@@ -4323,7 +4454,7 @@ static void onPress(int pin) {
     if (pin == PIN_DOWN && g_notePage < pages - 1) g_notePage++;
     if (pin == PIN_UP && g_notePage > 0) g_notePage--;
     if (pin == PIN_CLICK || pin == PIN_EXIT || pin == PIN_MENU) {
-      g_prefs.putInt(noteKey(g_noteName).c_str(), g_notePage);
+      saveNoteSpot();
       if (g_noteFile) g_noteFile.close();
       g_screen = (pin == PIN_MENU) ? SCREEN_HOME : SCREEN_FILES;
     }
@@ -4593,6 +4724,7 @@ void setup() {
 
   g_prefs.begin("pager", false);
   g_flip = g_prefs.getBool("flip", false);
+  g_readTurn = g_prefs.getUChar("readTurn", 0) % 3;
   g_fastRefresh = g_prefs.getBool("fast", true);
   g_mirror = g_prefs.getBool("mirror", true);
   g_smallText = g_prefs.getBool("small", true);

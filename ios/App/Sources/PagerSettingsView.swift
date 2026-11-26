@@ -35,6 +35,19 @@ struct PagerSettingsView: View {
                         Text("Two-button controls need pager firmware v2.0. Install it from the Update tab, then come back here.").font(.callout)
                     }
                 }
+                if link.settings["read"] != nil {
+                    Section {
+                        Picker("Page layout", selection: choice("read")) {
+                            Text("Wide").tag(0)
+                            Text("Tall").tag(1)
+                            Text("Tall, flipped").tag(2)
+                        }
+                    } header: {
+                        Text("Reading")
+                    } footer: {
+                        Text("For notes and books sent from this app. Tall turns the page on its side, like a paperback: shorter lines, more of them. If the page comes out upside down for the way you hold it, pick the flipped one. Menus and the home screen stay wide.")
+                    }
+                }
                 if link.settings["popup"] != nil {
                     Section {
                         Picker("Stay on screen", selection: choice("popup")) {
