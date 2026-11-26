@@ -39,8 +39,10 @@
 #include "driver/gpio.h"
 #include "driver/rtc_io.h"
 #include "esp_sleep.h"
+#include "esp_pm.h"
+#include "esp_system.h"
 
-#include "esp32s3/rom/miniz.h"  // zlib unpacking, built into the chip
+#include "miniz.h"  // zlib unpacking, built into the chip
 
 #include "epd.h"
 #include "library.h"
@@ -102,7 +104,7 @@ struct PendingFetch {
   bool preexisting;  // was already on the phone before the pager connected
 };
 
-static const char* const FIRMWARE_VERSION = "v2.1";
+static const char* const FIRMWARE_VERSION = "v2.2";
 
 // One write to the phone's control point, carried out by the Bluetooth task.
 struct BleRequest {
@@ -816,6 +818,28 @@ static String settingsText() {
   s += "line2=" + g_cardLine2 + "\n";
   s += "qr=" + g_cardQr + "\n";
   return s;
+}
+
+// ---- Power saving -------------------------------------------------------
+// Between jobs the chip naps (light sleep) and Bluetooth only wakes for its
+// own radio slots. Drawing the screen and file transfers hold it awake.
+static bool g_saverOn = false;                 // napping is switched on for this boot
+static esp_pm_lock_handle_t g_awakeLock = nullptr;
+static bool g_awakeHeld = false;
+static volatile bool g_inputBusy = false;      // a button is down or a tap is being timed
+static bool g_linkSlow = false;                // the phone was asked for the relaxed link
+static uint32_t g_linkAskedGen = 0;
+static uint32_t g_linkAskAtMs = 0;
+static bool g_bootCounted = false;
+
+static void startPowerSaving(bool skip);
+static void servicePower();
+static void idleWait(uint32_t ms);
+
+static void stayAwake(bool on) {
+  if (!g_awakeLock || on == g_awakeHeld) return;
+  if (on) esp_pm_lock_acquire(g_awakeLock); else esp_pm_lock_release(g_awakeLock);
+  g_awakeHeld = on;
 }
 
 // Storage, file lists and firmware installs: slow work kept off the main loop.
@@ -3966,7 +3990,8 @@ static void inputTask(void*) {
         emit(tapPin == PIN_EXIT ? PIN_DOWN : PIN_UP, now);
         tapPin = -1;
       }
-      vTaskDelay(pdMS_TO_TICKS(5));
+      g_inputBusy = stable[3] || stable[4] || last[3] || last[4] || tapPin >= 0;
+      vTaskDelay(pdMS_TO_TICKS(g_inputBusy ? 5 : 20));
       continue;
     }
     // Holding the wheel up or down keeps moving through a list, one row per redraw.
@@ -3984,7 +4009,10 @@ static void inputTask(void*) {
       xQueueSend(g_buttonQueue, &heldBackPin, 0);
       heldBackPin = -1;
     }
-    vTaskDelay(pdMS_TO_TICKS(5));
+    bool busy = heldBackPin >= 0;
+    for (int i = 0; i < BUTTON_COUNT; i++) busy = busy || stable[i] || last[i];
+    g_inputBusy = busy;
+    vTaskDelay(pdMS_TO_TICKS(busy ? 5 : 20));
   }
 }
 
@@ -4606,6 +4634,7 @@ void setup() {
   // The power-on shortcuts must not fire when a button is what woke it up.
   bool menuHeld = !g_fromSleep && (digitalRead(PIN_MENU) == LOW);
   bool exitHeld = !g_fromSleep && (digitalRead(PIN_EXIT) == LOW);
+  bool menuHeldAtBoot = !g_fromSleep && (digitalRead(PIN_MENU) == LOW);
 
   if (g_fromSleep && g_rtc.timeValid) {
     struct timeval tv = {};
@@ -4638,10 +4667,73 @@ void setup() {
   }
 
   setCpuFrequencyMhz(80);
+  startPowerSaving(menuHeldAtBoot);
   xTaskCreatePinnedToCore(inputTask, "input", 3072, nullptr, 3, nullptr, 1);
   xTaskCreatePinnedToCore(bluetoothTask, "pager-ble", 8192, nullptr, 2, nullptr, 1);
   g_lastActivityMs = millis();
   markDirty(0);
+}
+
+// Switch napping on, unless the last few starts crashed or MENU is held at
+// power-on (the escape hatch if power saving ever misbehaves).
+static void startPowerSaving(bool skip) {
+  esp_reset_reason_t why = esp_reset_reason();
+  bool crashed = why == ESP_RST_PANIC || why == ESP_RST_INT_WDT || why == ESP_RST_TASK_WDT ||
+                 why == ESP_RST_WDT || why == ESP_RST_BROWNOUT;
+  uint8_t bad = g_prefs.getUChar("badBoots", 0);
+  if (crashed) {
+    if (bad < 250) bad++;
+    g_prefs.putUChar("badBoots", bad);
+  }
+  g_bootCounted = bad > 0;
+  if (skip || bad >= 3) {
+    Serial.printf("[power] saver off this boot (skip %d, bad boots %u)\n", (int)skip, (unsigned)bad);
+    return;
+  }
+  esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "inkfob", &g_awakeLock);
+  esp_pm_config_t cfg = {};
+  cfg.max_freq_mhz = 80;
+  cfg.min_freq_mhz = 80;
+  cfg.light_sleep_enable = true;
+  esp_err_t err = esp_pm_configure(&cfg);
+  g_saverOn = (err == ESP_OK);
+  Serial.printf("[power] saver %s (%d)\n", g_saverOn ? "on" : "failed", (int)err);
+}
+
+// Keeps the chip awake only while it has to be, and asks the phone for a
+// relaxed link when idle and a quick one while a file or update is arriving.
+static void servicePower() {
+  uint32_t now = millis();
+  if (g_bootCounted && now > 90000) {          // ran fine for a while: clear the crash count
+    g_bootCounted = false;
+    g_prefs.putUChar("badBoots", 0);
+  }
+  bool busy = g_xferKind != 0;
+  stayAwake(busy);
+  if (!g_connected) return;
+  NimBLEServer* server = NimBLEDevice::getServer();
+  if (!server) return;
+  if (g_linkAskedGen != g_connGeneration) {    // a fresh connection starts quick
+    g_linkAskedGen = g_connGeneration;
+    g_linkSlow = false;
+    g_linkAskAtMs = now + 25000;
+  }
+  if (busy) {
+    if (g_linkSlow) {
+      server->updateConnParams(g_connHandle, 12, 24, 0, 400);      // 15-30 ms
+      g_linkSlow = false;
+    }
+    g_linkAskAtMs = now + 8000;
+  } else if (g_saverOn && !g_linkSlow && !g_fetching && (int32_t)(now - g_linkAskAtMs) >= 0) {
+    server->updateConnParams(g_connHandle, 144, 168, 2, 600);      // 180-210 ms, may skip 2
+    g_linkSlow = true;
+  }
+}
+
+// Rest until the next button press or for a short while, whichever is first.
+static void idleWait(uint32_t ms) {
+  int pin;
+  xQueuePeek(g_buttonQueue, &pin, pdMS_TO_TICKS(ms));
 }
 
 void loop() {
@@ -4651,7 +4743,8 @@ void loop() {
   serviceAppLink();
   if (g_quiet) {
     serviceQuietCheck();
-    delay(10);
+    servicePower();
+    idleWait(40);
     return;
   }
   g_repeatOk = !g_dirty && (g_screen == SCREEN_MENU || g_screen == SCREEN_LIST ||
@@ -4671,9 +4764,11 @@ void loop() {
       g_dirty = false;
       g_dirtyUrgent = false;
       g_rendering = true;
+      stayAwake(true);
       render();
       g_rendering = false;
     }
   }
-  delay(10);
+  servicePower();
+  idleWait(g_screen == SCREEN_SNAKE || g_dirty ? 10 : 40);
 }

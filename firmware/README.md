@@ -65,3 +65,5 @@ image at `0x0` wipes them.
 - The board ships with one of two e-ink panels (SSD1680 on V1.0 hardware, a
   different controller on V1.2). The firmware detects which at boot.
 - Serial log at 115200 baud on the USB-C port.
+- Power saving (v2.2, untested on hardware): built on Arduino core 3.3 through pioarduino with the core libraries rebuilt (`custom_sdkconfig` in `platformio.ini`) so power management, tickless idle and Bluetooth modem sleep are on. The chip light-sleeps between jobs, stays awake while drawing and during transfers, asks the phone for a 180-210 ms link when idle and a 15-30 ms link during transfers, and polls the buttons every 20 ms when none is down. Holding MENU at power-on, or three crashes in a row, leaves power saving off for that boot.
+- Recovery: `release/recovery/` holds v2.1. Over USB, write `otadata-blank.bin` at `0xE000` and `pager-firmware-v2.1.bin` at `0x10000`.
