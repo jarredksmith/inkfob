@@ -54,6 +54,9 @@ final class Hub: ObservableObject {
                     link.sendHomeLines(lines)
                     link.sendMore(extra.more)
                     link.sendDayLine(extra.dayLine)
+                    if let fix = feeds.lastFix {
+                        link.sendFix(lat: fix.lat, lon: fix.lon, accuracy: fix.accuracy, age: fix.age)
+                    }
                 }
                 UIApplication.shared.endBackgroundTask(task)
             }

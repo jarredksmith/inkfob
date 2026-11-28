@@ -32,6 +32,7 @@ struct HomeView: View {
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                 }
+                WaypointSection()
                 if !feeds.locationAllowed || !feeds.calendarAllowed {
                     Section("Permissions") {
                         if !feeds.locationAllowed {
@@ -54,6 +55,46 @@ struct HomeView: View {
 
     private var previewLines: [String] {
         link.lastSent.isEmpty ? ["Nothing sent yet"] : link.lastSent.components(separatedBy: "\n")
+    }
+}
+
+/// Saves where the phone is right now as a named spot on the pager.
+struct WaypointSection: View {
+    @EnvironmentObject var link: PagerLink
+    @EnvironmentObject var feeds: Feeds
+    @State private var name = ""
+    @State private var busy = false
+    @State private var note = ""
+
+    var body: some View {
+        Section {
+            TextField("Name (Car, Camp, Trailhead)", text: $name)
+            Button(busy ? "Finding you..." : "Save this spot to the pager") { save() }
+                .disabled(busy || !link.isReady || !feeds.locationAllowed)
+            if !note.isEmpty { Text(note).font(.footnote).foregroundStyle(.secondary) }
+        } header: {
+            Text("Waypoints")
+        } footer: {
+            Text("The pager keeps up to eight spots and shows them, with distance and direction from the phone's last known position, under Tools > Waypoints, even when the phone is off. The pager can also mark a spot by itself, using the position from the last time this app was open.")
+        }
+    }
+
+    private func save() {
+        busy = true
+        note = ""
+        Task {
+            let here = await feeds.preciseFix()
+            await MainActor.run {
+                busy = false
+                guard let here else { note = "Could not get a position. Try again outdoors."; return }
+                link.sendFix(lat: here.coordinate.latitude, lon: here.coordinate.longitude,
+                             accuracy: max(here.horizontalAccuracy, 0), age: 0)
+                link.sendMark(name)
+                let label = name.trimmingCharacters(in: .whitespaces)
+                note = "Saved \(label.isEmpty ? "a mark" : label), accurate to about \(Int(max(here.horizontalAccuracy, 0) * 3.28)) ft."
+                name = ""
+            }
+        }
     }
 }
 

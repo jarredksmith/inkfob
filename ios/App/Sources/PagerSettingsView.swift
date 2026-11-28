@@ -59,6 +59,15 @@ struct PagerSettingsView: View {
                         Text("When a notification pops up on the pager and you leave it alone, the screen goes back to what it was showing. The notification stays in the list as new. Pressing any button keeps it open.")
                     }
                 }
+                if link.settings["exped"] != nil {
+                    Section {
+                        Toggle("Expedition mode", isOn: flag("exped"))
+                    } header: {
+                        Text("Off the grid")
+                    } footer: {
+                        Text("For trips with no signal. The pager turns Bluetooth off, sleeps after a minute and wakes only when you press a button, so the battery lasts far longer. The clock, tools, waypoints, files and the survival library still work. Turning this on disconnects the pager from the phone; turn it off on the pager itself, under Settings > Expedition mode.")
+                    }
+                }
                 Section {
                     Picker("Sleep after", selection: choice("sleep")) {
                         ForEach(Array(Self.sleepChoices.enumerated()), id: \.offset) { index, label in Text(label).tag(index) }

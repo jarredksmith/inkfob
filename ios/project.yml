@@ -6,7 +6,7 @@ options:
     iOS: "17.0"
 settings:
   base:
-    MARKETING_VERSION: "0.9"
+    MARKETING_VERSION: "0.10"
     CURRENT_PROJECT_VERSION: "1"
     DEVELOPMENT_TEAM: SVYYTM3LTN
     CODE_SIGN_STYLE: Automatic
@@ -30,7 +30,7 @@ targets:
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
         INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription: "Inkfob joins your pager's Bluetooth connection to send it weather, calendar events, files and updates."
-        INFOPLIST_KEY_NSLocationWhenInUseUsageDescription: "Inkfob uses your location to get the local forecast it shows on your pager."
+        INFOPLIST_KEY_NSLocationWhenInUseUsageDescription: "Inkfob uses your location for the local forecast on your pager and to save waypoints you ask for."
         INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription: "Inkfob reads your next events so it can show them on your pager."
         INFOPLIST_KEY_NSRemindersFullAccessUsageDescription: "Inkfob reads the reminders due today so it can show them on your pager."
         INFOPLIST_KEY_NSMotionUsageDescription: "Inkfob reads today's step count so it can show it on your pager."

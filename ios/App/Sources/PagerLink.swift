@@ -172,6 +172,16 @@ final class PagerLink: NSObject, ObservableObject, CBCentralManagerDelegate, CBP
         send("J", Data(slots.joined(separator: "\n").utf8))
     }
 
+    /// The phone's position, kept by the pager for its Waypoints tool.
+    func sendFix(lat: Double, lon: Double, accuracy: Double, age: Double) {
+        send("W", Data(String(format: "%.6f,%.6f,%.0f,%.0f", lat, lon, accuracy, age).utf8))
+    }
+
+    /// Saves the position just sent as a named waypoint on the pager.
+    func sendMark(_ name: String) {
+        send("M", Data(Self.plain(name, limit: 15).utf8))
+    }
+
     /// The line for the day, shown on the pager's Today screen.
     func sendDayLine(_ text: String) {
         send("Q", Data(Self.plain(text.replacingOccurrences(of: "\n", with: " "), limit: 190).utf8))

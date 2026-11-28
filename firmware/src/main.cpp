@@ -104,7 +104,7 @@ struct PendingFetch {
   bool preexisting;  // was already on the phone before the pager connected
 };
 
-static const char* const FIRMWARE_VERSION = "v2.3";
+static const char* const FIRMWARE_VERSION = "v2.4";
 
 // One write to the phone's control point, carried out by the Bluetooth task.
 struct BleRequest {
@@ -206,7 +206,10 @@ enum Screen {
   SCREEN_FIND,
   SCREEN_MORSE,
   SCREEN_HANGMAN,
-  SCREEN_MINES
+  SCREEN_MINES,
+  SCREEN_WAYPOINTS,
+  SCREEN_WAYPOINT,
+  SCREEN_KNOTS
 };
 static Screen g_screen = SCREEN_HOME;
 
@@ -288,6 +291,7 @@ static uint32_t g_dirtySinceMs = 0;  // when the screen first became out of date
 static bool g_dirtyUrgent = false;   // a button was pressed: redraw straight away
 static uint8_t g_fastCount = 0;
 static bool g_forceFull = true;
+static bool g_expedition = false;            // Bluetooth off, sleeps fast, wakes on a button only
 static uint8_t g_readTurn = 0;               // 0 wide, 1 tall, 2 tall the other way up
 static const char* const READ_NAMES[] = {"Wide", "Tall", "Tall, flipped"};
 
@@ -780,7 +784,7 @@ class AppControlCallbacks : public NimBLECharacteristicCallbacks {
     c.cmd = (char)value.data()[0];
     c.len = (uint16_t)min((size_t)(value.size() - 1), sizeof(c.text) - 1);
     memcpy(c.text, value.data() + 1, c.len);
-    bool forMain = (c.cmd == 'I' || c.cmd == 'S' || c.cmd == 'J' || c.cmd == 'Q');
+    bool forMain = (c.cmd == 'I' || c.cmd == 'S' || c.cmd == 'J' || c.cmd == 'Q' || c.cmd == 'W' || c.cmd == 'M');
     xQueueSend(forMain ? g_appMainQueue : g_appWorkQueue, &c, 0);
   }
 };
@@ -813,6 +817,7 @@ static String settingsText() {
   s += "popup=" + String((int)g_popupChoice) + "\n";
   s += "btn2=" + String(g_twoButton ? 1 : 0) + "\n";
   s += "read=" + String((int)g_readTurn) + "\n";
+  s += "exped=" + String(g_expedition ? 1 : 0) + "\n";
   s += "corners=";
   for (int i = 0; i < 4; i++) s += String((int)g_corners[i]);
   s += "\n";
@@ -836,6 +841,10 @@ static uint32_t g_linkAskAtMs = 0;
 static bool g_bootCounted = false;
 
 static void startPowerSaving(bool skip);
+static void setExpedition(bool on);
+static void openReader(int item, int page);
+static void setFix(const String& text);
+static bool addWaypoint(const String& wanted);
 static void servicePower();
 static void idleWait(uint32_t ms);
 
@@ -1094,7 +1103,7 @@ static void startBluetooth() {
   adv->setAdvertisingInterval(32);
   g_advFast = true;
   g_fastAdvUntilMs = millis() + 30000;
-  adv->start();
+  if (!g_expedition) adv->start();
   Serial.println("[ble] advertising as \"Pager\"");
 }
 
@@ -1218,7 +1227,7 @@ static void bluetoothTask(void*) {
           adv->setAdvertisingInterval(wantFast ? 32 : 244);
           g_advFast = wantFast;
         }
-        if (adv && !adv->isAdvertising()) adv->start();
+        if (adv && !adv->isAdvertising() && !g_expedition) adv->start();
       }
       vTaskDelay(pdMS_TO_TICKS(50));
       continue;
@@ -1799,7 +1808,31 @@ static void drawFace(const String& clock, const String& ampm, const String& date
   g_canvas.print(label);
 }
 
+// Expedition mode's home screen: the clock and nothing that needs the phone.
+static void drawExpeditionHome() {
+  drawHeader("EXPEDITION MODE", "Bluetooth off");
+  g_canvas.setTextColor(1);
+  ClockNow now;
+  if (clockNow(now)) {
+    static const char* const DAYS[] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
+    static const char* const MONTHS[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    int hour12 = now.hour % 12;
+    if (hour12 == 0) hour12 = 12;
+    g_homeMinute = now.hour * 60 + now.minute;
+    g_canvas.setFont(&FreeSansBold24pt7b);
+    drawCentered(String(hour12) + ":" + (now.minute < 10 ? "0" : "") + String(now.minute) + (now.hour < 12 ? " AM" : " PM"), 64);
+    drawSmallCentered(String(DAYS[now.weekday]) + ", " + MONTHS[now.month - 1] + " " + String(now.day), 76);
+  } else {
+    g_canvas.setFont(&FreeSansBold9pt7b);
+    drawCentered("Clock not set", 58);
+    drawSmallCentered("Connect to the phone once to set it", 72);
+  }
+  drawSmallCentered("Sleeps after 1 minute. Any button wakes it.", 96);
+  drawSmallCentered("MENU for tools, waypoints and the library", 108);
+}
+
 static void drawHome() {
+  if (g_expedition) { drawExpeditionHome(); return; }
   ClockNow faceNow;
   if (g_face != 0 && clockNow(faceNow)) {
     static const char* const SHORT_DAYS[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
@@ -2236,7 +2269,7 @@ static void drawDetail() {
   }
 }
 
-static const int SETTINGS_COUNT = 14;
+static const int SETTINGS_COUNT = 15;
 
 static String minutesLabel(int minutes) {
   if (minutes >= 60) return String(minutes / 60) + (minutes == 60 ? " hour" : " hours");
@@ -2267,8 +2300,9 @@ static String settingsLabel(int i) {
     }
     case 9: return String("Controls: ") + (g_twoButton ? "Two buttons" : "Wheel");
     case 10: return String("Reading: ") + READ_NAMES[g_readTurn];
-    case 11: return "Status";
-    case 12: return "Clear list";
+    case 11: return String("Expedition mode: ") + (g_expedition ? "On" : "Off");
+    case 12: return "Status";
+    case 13: return "Clear list";
     default: return "Forget phone";
   }
 }
@@ -2690,6 +2724,132 @@ static void drawUpdate() {
   drawSmallCentered("Keep the phone close. Do not switch off.", 100);
 }
 
+// ---- Waypoints -----------------------------------------------------------
+// The phone app sends its position whenever it sends anything else. The pager
+// keeps the latest one (the "fix") and up to eight saved spots, all stored so
+// they survive sleep, restarts and a dead phone.
+struct Fix {
+  double lat, lon;
+  float accuracy;      // metres
+  int64_t at;          // pager clock, seconds (0 = clock was not set)
+  uint8_t ok;
+};
+struct Waypoint {
+  char name[16];
+  double lat, lon;
+  int64_t at;
+};
+static const int WAYPOINT_MAX = 8;
+static Fix g_fix = {};
+static Waypoint g_waypoints[WAYPOINT_MAX];
+static int g_waypointCount = 0;
+static int g_wpSel = 0, g_wpTop = 0, g_wpOpen = 0;
+static bool g_wpArmed = false;
+static String g_wpNote;
+
+static int64_t clockSeconds() {
+  if (!g_timeKnown) return 0;
+  return g_timeBase + (uint32_t)(millis() - g_timeBaseMs) / 1000;
+}
+
+static void loadWaypoints() {
+  if (g_prefs.getBytesLength("fix") == sizeof(g_fix)) g_prefs.getBytes("fix", &g_fix, sizeof(g_fix));
+  size_t len = g_prefs.getBytesLength("wpts");
+  if (len > 0 && len % sizeof(Waypoint) == 0 && len <= sizeof(g_waypoints)) {
+    g_prefs.getBytes("wpts", g_waypoints, len);
+    g_waypointCount = (int)(len / sizeof(Waypoint));
+  }
+}
+
+static void saveWaypoints() {
+  if (g_waypointCount == 0) g_prefs.remove("wpts");
+  else g_prefs.putBytes("wpts", g_waypoints, g_waypointCount * sizeof(Waypoint));
+}
+
+// "lat,lon,accuracy in metres,age in seconds"
+static void setFix(const String& text) {
+  double v[4] = {0, 0, 0, 0};
+  int n = 0, from = 0;
+  while (n < 4 && from <= (int)text.length()) {
+    int comma = text.indexOf(',', from);
+    if (comma < 0) comma = text.length();
+    v[n++] = text.substring(from, comma).toDouble();
+    from = comma + 1;
+  }
+  if (n < 2 || v[0] < -90 || v[0] > 90 || v[1] < -180 || v[1] > 180) return;
+  if (v[0] == 0 && v[1] == 0) return;
+  g_fix.lat = v[0];
+  g_fix.lon = v[1];
+  g_fix.accuracy = (float)v[2];
+  int64_t now = clockSeconds();
+  g_fix.at = now ? now - (int64_t)v[3] : 0;
+  g_fix.ok = 1;
+  g_prefs.putBytes("fix", &g_fix, sizeof(g_fix));
+}
+
+// Saves the latest fix under a name. Returns false when there is no fix or no room.
+static bool addWaypoint(const String& wanted) {
+  if (!g_fix.ok || g_waypointCount >= WAYPOINT_MAX) return false;
+  String name = wanted;
+  name.trim();
+  if (!name.length()) {
+    int n = 1;
+    for (bool clash = true; clash; ) {
+      name = "Mark " + String(n++);
+      clash = false;
+      for (int i = 0; i < g_waypointCount; i++) clash = clash || name == g_waypoints[i].name;
+    }
+  }
+  for (size_t i = 0; i < name.length(); i++) if (name[i] < 32 || name[i] > 126) name[i] = '?';
+  Waypoint& w = g_waypoints[g_waypointCount++];
+  memset(&w, 0, sizeof(w));
+  strncpy(w.name, name.c_str(), sizeof(w.name) - 1);
+  w.lat = g_fix.lat;
+  w.lon = g_fix.lon;
+  w.at = g_fix.at;
+  saveWaypoints();
+  return true;
+}
+
+static void deleteWaypoint(int i) {
+  if (i < 0 || i >= g_waypointCount) return;
+  for (int k = i; k < g_waypointCount - 1; k++) g_waypoints[k] = g_waypoints[k + 1];
+  g_waypointCount--;
+  saveWaypoints();
+}
+
+// Straight-line distance in metres and compass bearing in degrees from a to b.
+static void rangeTo(double lat1, double lon1, double lat2, double lon2, double& metres, double& bearing) {
+  const double R = 6371000.0, D = 0.017453292519943295;
+  double p1 = lat1 * D, p2 = lat2 * D, dp = (lat2 - lat1) * D, dl = (lon2 - lon1) * D;
+  double a = sin(dp / 2) * sin(dp / 2) + cos(p1) * cos(p2) * sin(dl / 2) * sin(dl / 2);
+  metres = 2 * R * atan2(sqrt(a), sqrt(1 - a));
+  bearing = atan2(sin(dl) * cos(p2), cos(p1) * sin(p2) - sin(p1) * cos(p2) * cos(dl)) / D;
+  if (bearing < 0) bearing += 360;
+}
+
+static String rangeText(const Waypoint& w) {
+  if (!g_fix.ok) return "";
+  double m, b;
+  rangeTo(g_fix.lat, g_fix.lon, w.lat, w.lon, m, b);
+  static const char* const POINTS[8] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
+  double feet = m * 3.28084, miles = m / 1609.344;
+  if (feet < 60) return "here";
+  String d = feet < 1000 ? String((int)(feet / 10 + 0.5) * 10) + " ft"
+           : miles < 100 ? String(miles, 1) + " mi" : String((int)(miles + 0.5)) + " mi";
+  return d + " " + POINTS[(int)((b + 22.5) / 45) % 8];
+}
+
+static String agoText(int64_t at) {
+  int64_t now = clockSeconds();
+  if (!at || !now || now < at) return "";
+  int64_t s = now - at;
+  if (s < 90) return "just now";
+  if (s < 5400) return String((int)(s / 60)) + " min ago";
+  if (s < 48 * 3600) return String((int)(s / 3600)) + " hr ago";
+  return String((int)(s / 86400)) + " days ago";
+}
+
 // Applies a setting sent by the app ("key=value").
 static void applyAppSetting(const String& pair) {
   int eq = pair.indexOf('=');
@@ -2725,6 +2885,8 @@ static void applyAppSetting(const String& pair) {
   } else if (key == "btn2") {
     g_twoButton = number != 0;
     g_prefs.putBool("twoButton", g_twoButton);
+  } else if (key == "exped") {
+    setExpedition(number != 0);
   } else if (key == "read" && number >= 0 && number < 3) {
     setReadTurn((uint8_t)number);
   } else if (key == "popup" && number >= 0 && number < POPUP_CHOICES) {
@@ -2788,6 +2950,12 @@ static void serviceAppLink() {
     } else if (c.cmd == 'Q') {
       g_quote = text;
       if (g_screen == SCREEN_TODAY) markDirty(300);
+    } else if (c.cmd == 'W') {
+      setFix(text);
+      if (g_screen == SCREEN_WAYPOINTS || g_screen == SCREEN_WAYPOINT) markDirty(300);
+    } else if (c.cmd == 'M') {
+      addWaypoint(text);
+      if (g_screen == SCREEN_WAYPOINTS) markDirty(300);
     }
   }
 
@@ -2849,7 +3017,7 @@ int qrcodegen_getSize(const uint8_t qrcode[]);
 bool qrcodegen_getModule(const uint8_t qrcode[], int x, int y);
 }
 
-static const int TOOLS_COUNT = 11;
+static const int TOOLS_COUNT = 13;
 static const int GAMES_COUNT = 7;
 static int g_toolsSel = 0, g_toolsTop = 0, g_gamesSel = 0;
 
@@ -2946,7 +3114,8 @@ static bool isToolScreen() {
          g_screen == SCREEN_MORSE || g_screen == SCREEN_HANGMAN || g_screen == SCREEN_MINES ||
          g_screen == SCREEN_SNAKE || g_screen == SCREEN_2048 || g_screen == SCREEN_TOOLS || g_screen == SCREEN_TIMER || g_screen == SCREEN_STOPWATCH ||
          g_screen == SCREEN_REMOTE || g_screen == SCREEN_CARD || g_screen == SCREEN_ORACLE ||
-         g_screen == SCREEN_DICE || g_screen == SCREEN_COIN;
+         g_screen == SCREEN_DICE || g_screen == SCREEN_COIN || g_screen == SCREEN_WAYPOINTS ||
+         g_screen == SCREEN_WAYPOINT || g_screen == SCREEN_KNOTS;
 }
 
 static String clockFace(int seconds) {
@@ -3007,6 +3176,8 @@ static String toolsLabel(int i) {
     case 7: return "Camera remote";
     case 8: return "My card (QR code)";
     case 9: return "Morse code";
+    case 10: return g_waypointCount ? "Waypoints (" + String(g_waypointCount) + ")" : String("Waypoints");
+    case 11: return "Knots and lashings";
     default: return "Games";
   }
 }
@@ -3021,6 +3192,72 @@ static bool isGameScreen() {
   return g_screen == SCREEN_SNAKE || g_screen == SCREEN_2048 || g_screen == SCREEN_HANGMAN ||
          g_screen == SCREEN_MINES || g_screen == SCREEN_ORACLE || g_screen == SCREEN_DICE ||
          g_screen == SCREEN_COIN;
+}
+
+// ---- Waypoints and the knots shortcut -----------------------------------
+static String waypointLabel(int i) {
+  if (i == 0) return "Mark this spot";
+  const Waypoint& w = g_waypoints[i - 1];
+  String r = rangeText(w);
+  return r.length() ? String(w.name) + "  " + r : String(w.name);
+}
+
+static void drawWaypoints() {
+  String age = g_fix.ok ? agoText(g_fix.at) : String("no position");
+  drawHeader("WAYPOINTS", age.length() ? "phone: " + age : String("phone position"));
+  if (g_wpNote.length()) {
+    g_canvas.setTextColor(1);
+    drawSmallCentered(g_wpNote, 56);
+    drawSmallCentered("Press any button", 76);
+    return;
+  }
+  keepVisible(g_wpSel, g_wpTop);
+  drawRows(g_waypointCount + 1, g_wpSel, g_wpTop, waypointLabel);
+}
+
+static void drawWaypoint() {
+  if (g_wpOpen >= g_waypointCount) { drawWaypoints(); return; }
+  const Waypoint& w = g_waypoints[g_wpOpen];
+  drawHeader(w.name, "EXIT = back");
+  drawMedium(String(w.lat, 5) + ", " + String(w.lon, 5), 44);
+  String saved = agoText(w.at);
+  drawHint(saved.length() ? "Saved " + saved : String("Saved (clock was not set)"), 54);
+  String r = rangeText(w);
+  if (r.length()) {
+    String age = agoText(g_fix.at);
+    drawMedium(r == "here" ? String("You are here") : r, 82);
+    drawHint(age.length() ? "from the phone's position " + age : String("from the phone's last position"), 92);
+  }
+  drawHint(g_wpArmed ? "Press DOWN again to delete it" : "DOWN twice = delete", 110);
+}
+
+static int g_knotItems[12];
+static int g_knotCount = 0, g_knotSel = 0, g_knotTop = 0;
+
+// The reading library already has several rope chapters; this gathers them.
+static void findKnots() {
+  g_knotCount = 0;
+  for (int i = 0; i < Library::itemCount() && g_knotCount < 12; i++) {
+    String t = Library::itemTitle(i);
+    t.toLowerCase();
+    if (t.indexOf("knot") >= 0 || t.indexOf("lashing") >= 0 || t.indexOf("cordage") >= 0) g_knotItems[g_knotCount++] = i;
+  }
+  if (g_knotSel >= g_knotCount) g_knotSel = 0;
+}
+
+static String knotLabel(int i) {
+  return String(Library::itemTitle(g_knotItems[i])) + " (" + String(Library::itemPageCount(g_knotItems[i])) + " pages)";
+}
+
+static void drawKnots() {
+  drawHeader("KNOTS AND LASHINGS", "EXIT = back");
+  if (g_knotCount == 0) {
+    g_canvas.setTextColor(1);
+    drawSmallCentered("The library has no rope chapters.", 60);
+    return;
+  }
+  keepVisible(g_knotSel, g_knotTop);
+  drawRows(g_knotCount, g_knotSel, g_knotTop, knotLabel);
 }
 
 static void drawTools() {
@@ -3663,8 +3900,56 @@ static bool onToolPress(int pin) {
     if (pin == PIN_CLICK) {
       static const Screen TARGETS[TOOLS_COUNT] = {
           SCREEN_TIMER, SCREEN_STOPWATCH, SCREEN_POMO, SCREEN_TALLY, SCREEN_TIP,  SCREEN_CONVERT,
-          SCREEN_FIND,  SCREEN_REMOTE,    SCREEN_CARD, SCREEN_MORSE, SCREEN_GAMES};
+          SCREEN_FIND,  SCREEN_REMOTE,    SCREEN_CARD, SCREEN_MORSE, SCREEN_WAYPOINTS, SCREEN_KNOTS,
+          SCREEN_GAMES};
       g_screen = TARGETS[g_toolsSel];
+      if (g_screen == SCREEN_WAYPOINTS) { g_wpSel = 0; g_wpNote = ""; }
+      if (g_screen == SCREEN_KNOTS) findKnots();
+    }
+    return true;
+  }
+  if (g_screen == SCREEN_WAYPOINTS) {
+    int rows = g_waypointCount + 1;
+    g_wpNote = "";
+    if (pin == PIN_UP && g_wpSel > 0) g_wpSel--;
+    if (pin == PIN_DOWN && g_wpSel < rows - 1) g_wpSel++;
+    if (pin == PIN_EXIT) g_screen = SCREEN_TOOLS;
+    if (pin == PIN_MENU) g_screen = SCREEN_HOME;
+    if (pin == PIN_CLICK) {
+      if (g_wpSel == 0) {
+        if (!g_fix.ok) g_wpNote = "No position yet. Open the phone app once.";
+        else if (g_waypointCount >= WAYPOINT_MAX) g_wpNote = "Full. Delete one first.";
+        else if (addWaypoint("")) g_wpSel = g_waypointCount;
+      } else {
+        g_wpOpen = g_wpSel - 1;
+        g_wpArmed = false;
+        g_screen = SCREEN_WAYPOINT;
+      }
+    }
+    return true;
+  }
+  if (g_screen == SCREEN_WAYPOINT) {
+    if (pin == PIN_DOWN) {
+      if (g_wpArmed) {
+        deleteWaypoint(g_wpOpen);
+        g_wpSel = min(g_wpSel, g_waypointCount);
+        g_screen = SCREEN_WAYPOINTS;
+      }
+      g_wpArmed = !g_wpArmed && g_screen == SCREEN_WAYPOINT;
+    } else {
+      g_wpArmed = false;
+      g_screen = (pin == PIN_MENU) ? SCREEN_HOME : SCREEN_WAYPOINTS;
+    }
+    return true;
+  }
+  if (g_screen == SCREEN_KNOTS) {
+    if (pin == PIN_UP && g_knotSel > 0) g_knotSel--;
+    if (pin == PIN_DOWN && g_knotSel < g_knotCount - 1) g_knotSel++;
+    if (pin == PIN_EXIT) g_screen = SCREEN_TOOLS;
+    if (pin == PIN_MENU) g_screen = SCREEN_HOME;
+    if (pin == PIN_CLICK && g_knotCount > 0) {
+      openReader(g_knotItems[g_knotSel], 0);
+      g_screen = SCREEN_READER;
     }
     return true;
   }
@@ -4007,6 +4292,9 @@ static void render() {
     case SCREEN_TIP: drawTip(); break;
     case SCREEN_CONVERT: drawConvert(); break;
     case SCREEN_FIND: drawFind(); break;
+    case SCREEN_WAYPOINTS: drawWaypoints(); break;
+    case SCREEN_WAYPOINT: drawWaypoint(); break;
+    case SCREEN_KNOTS: drawKnots(); break;
     case SCREEN_MORSE: drawMorse(); break;
     case SCREEN_HANGMAN: drawHangman(); break;
     case SCREEN_MINES: drawMines(); break;
@@ -4150,6 +4438,29 @@ static void forgetPhone() {
   ESP.restart();
 }
 
+// Expedition mode: the radio goes quiet and the pager sleeps after a minute,
+// waking only for a button. Turning it off starts advertising again.
+static void setExpedition(bool on) {
+  if (on == g_expedition) return;
+  g_expedition = on;
+  g_prefs.putBool("exped", on);
+  NimBLEServer* server = NimBLEDevice::getServer();
+  NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
+  if (on) {
+    if (server) {
+      server->advertiseOnDisconnect(false);
+      if (g_connected) server->disconnect(g_connHandle);
+    }
+    if (adv) adv->stop();
+  } else {
+    if (server) server->advertiseOnDisconnect(true);
+    g_fastAdvUntilMs = millis() + 30000;
+  }
+  g_lastActivityMs = millis();
+  g_forceFull = true;
+  if (g_screen == SCREEN_HOME) markDirty(0);
+}
+
 static void onSettingsSelect() {
   switch (g_settingsSel) {
     case 0:
@@ -4203,9 +4514,12 @@ static void onSettingsSelect() {
       setReadTurn(g_readTurn + 1);
       break;
     case 11:
-      g_screen = SCREEN_STATUS;
+      setExpedition(!g_expedition);
       break;
     case 12:
+      g_screen = SCREEN_STATUS;
+      break;
+    case 13:
       g_notes.clear();
       g_sel = 0;
       g_listTop = 0;
@@ -4638,7 +4952,7 @@ static void enterSleep(bool drawFace) {
   esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);  // keeps the pull-ups working
   esp_sleep_enable_ext1_wakeup(mask, ESP_EXT1_WAKEUP_ANY_LOW);
   int minutes = CHECK_MINUTES[g_checkChoice];
-  if (minutes > 0 && paired) esp_sleep_enable_timer_wakeup((uint64_t)minutes * 60ULL * 1000000ULL);
+  if (minutes > 0 && paired && !g_expedition) esp_sleep_enable_timer_wakeup((uint64_t)minutes * 60ULL * 1000000ULL);
   Serial.flush();
   esp_deep_sleep_start();
 }
@@ -4662,14 +4976,14 @@ static void servicePopup() {
 }
 
 static void serviceIdle() {
-  int minutes = SLEEP_MINUTES[g_sleepChoice];
+  int minutes = g_expedition ? 1 : SLEEP_MINUTES[g_sleepChoice];
   if (minutes == 0) return;
   if (millis() - g_lastActivityMs < (uint32_t)minutes * 60000UL) return;
   if (g_dirty || g_fetching || !g_pending.empty()) return;
   if (g_timerRunning || g_timerBlinking) return;  // a sleep would lose the countdown
   if (g_xferKind) return;                          // a file or firmware is arriving
   if (g_swRunning && stopwatchMs() < 3UL * 3600UL * 1000UL) return;
-  if (NimBLEDevice::getNumBonds() == 0) return;  // still being paired
+  if (!g_expedition && NimBLEDevice::getNumBonds() == 0) return;  // still being paired
   enterSleep(true);
 }
 
@@ -4725,6 +5039,8 @@ void setup() {
   g_prefs.begin("pager", false);
   g_flip = g_prefs.getBool("flip", false);
   g_readTurn = g_prefs.getUChar("readTurn", 0) % 3;
+  g_expedition = g_prefs.getBool("exped", false);
+  loadWaypoints();
   g_fastRefresh = g_prefs.getBool("fast", true);
   g_mirror = g_prefs.getBool("mirror", true);
   g_smallText = g_prefs.getBool("small", true);

@@ -54,11 +54,47 @@ final class Feeds: NSObject, ObservableObject, CLLocationManagerDelegate {
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         guard let here = locations.last else { return }
-        UserDefaults.standard.set(here.coordinate.latitude, forKey: "lat")
-        UserDefaults.standard.set(here.coordinate.longitude, forKey: "lon")
+        let defaults = UserDefaults.standard
+        defaults.set(here.coordinate.latitude, forKey: "lat")
+        defaults.set(here.coordinate.longitude, forKey: "lon")
+        defaults.set(max(here.horizontalAccuracy, 0), forKey: "fixAccuracy")
+        defaults.set(here.timestamp.timeIntervalSince1970, forKey: "fixAt")
+        finishPrecise(here)
     }
 
-    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {}
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        finishPrecise(nil)
+    }
+
+    private var preciseWaiters: [(CLLocation?) -> Void] = []
+
+    private func finishPrecise(_ location: CLLocation?) {
+        let waiting = preciseWaiters
+        preciseWaiters = []
+        locator.desiredAccuracy = kCLLocationAccuracyKilometer
+        waiting.forEach { $0(location) }
+    }
+
+    /// A fresh, accurate position for saving a waypoint. Only works while the app is on screen.
+    func preciseFix() async -> CLLocation? {
+        guard locationAllowed else { return nil }
+        return await withCheckedContinuation { done in
+            DispatchQueue.main.async {
+                self.preciseWaiters.append { done.resume(returning: $0) }
+                self.locator.desiredAccuracy = kCLLocationAccuracyBest
+                self.locator.requestLocation()
+            }
+        }
+    }
+
+    /// The last position the phone gave the app: latitude, longitude, accuracy in metres, age in seconds.
+    var lastFix: (lat: Double, lon: Double, accuracy: Double, age: Double)? {
+        let defaults = UserDefaults.standard
+        let at = defaults.double(forKey: "fixAt")
+        guard at > 0, defaults.object(forKey: "lat") != nil else { return nil }
+        return (defaults.double(forKey: "lat"), defaults.double(forKey: "lon"),
+                defaults.double(forKey: "fixAccuracy"), max(0, Date().timeIntervalSince1970 - at))
+    }
 
     /// Updates the saved position (only possible while the app is on screen).
     func updateLocation() {
