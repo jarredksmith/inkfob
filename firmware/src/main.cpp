@@ -104,7 +104,7 @@ struct PendingFetch {
   bool preexisting;  // was already on the phone before the pager connected
 };
 
-static const char* const FIRMWARE_VERSION = "v2.4";
+static const char* const FIRMWARE_VERSION = "v2.5";
 
 // One write to the phone's control point, carried out by the Bluetooth task.
 struct BleRequest {
@@ -209,7 +209,8 @@ enum Screen {
   SCREEN_MINES,
   SCREEN_WAYPOINTS,
   SCREEN_WAYPOINT,
-  SCREEN_KNOTS
+  SCREEN_KNOTS,
+  SCREEN_TODO
 };
 static Screen g_screen = SCREEN_HOME;
 
@@ -263,9 +264,9 @@ static int g_settingsSel = 0;
 static int g_settingsTop = 0;
 static uint8_t g_sleepFace = 0;  // 0 = status, 1 = my card
 // Home screen face: 0 classic, 1 big clock, 2 weather, 3 agenda, 4 minimal, 5 photo.
-static const int FACE_COUNT = 7;
+static const int FACE_COUNT = 8;
 static const char* const FACE_NAMES[FACE_COUNT] = {"Classic", "Big clock", "Weather", "Agenda",
-                                                   "Minimal", "Photo",     "Custom"};
+                                                   "Minimal", "Photo",     "Custom",  "To-do"};
 // The custom face: what goes in each corner (top left, top right, bottom left, bottom right).
 // 0 nothing, 1 date, 2 weather, 3 next event, 4 steps, 5 phone battery, 6 unread,
 // 7 countdown, 8 ticker, 9 reminder.
@@ -292,6 +293,8 @@ static bool g_dirtyUrgent = false;   // a button was pressed: redraw straight aw
 static uint8_t g_fastCount = 0;
 static bool g_forceFull = true;
 static bool g_expedition = false;            // Bluetooth off, sleeps fast, wakes on a button only
+static std::vector<String> g_todo;
+static std::vector<bool> g_todoDone;
 static uint8_t g_readTurn = 0;               // 0 wide, 1 tall, 2 tall the other way up
 static const char* const READ_NAMES[] = {"Wide", "Tall", "Tall, flipped"};
 
@@ -818,6 +821,7 @@ static String settingsText() {
   s += "btn2=" + String(g_twoButton ? 1 : 0) + "\n";
   s += "read=" + String((int)g_readTurn) + "\n";
   s += "exped=" + String(g_expedition ? 1 : 0) + "\n";
+  s += "todo=" + String((int)g_todo.size()) + "\n";
   s += "corners=";
   for (int i = 0; i < 4; i++) s += String((int)g_corners[i]);
   s += "\n";
@@ -1808,6 +1812,112 @@ static void drawFace(const String& clock, const String& ampm, const String& date
   g_canvas.print(label);
 }
 
+// ---- To-do list ----------------------------------------------------------
+// Kept in the file "todo.list" (sent by the phone app): one item per line,
+// "- milk" still to do, "x milk" done. Ticking an item rewrites the file.
+static int g_todoSel = 0, g_todoTop = 0;
+static const int TODO_ROW_H = 18, TODO_ROWS = 6;
+static String clockText();
+
+static void loadTodo() {
+  g_todo.clear();
+  g_todoDone.clear();
+  if (!g_fsReady) return;
+  File f = LittleFS.open("/todo.list", "r");
+  if (!f) return;
+  while (f.available() && g_todo.size() < 40) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (!line.length()) continue;
+    bool done = false;
+    if (line.startsWith("x ") || line.startsWith("X ")) { done = true; line = line.substring(2); }
+    else if (line.startsWith("[x]") || line.startsWith("[X]")) { done = true; line = line.substring(3); }
+    else if (line.startsWith("[ ]")) line = line.substring(3);
+    else if (line.startsWith("- ")) line = line.substring(2);
+    line.trim();
+    if (!line.length()) continue;
+    for (size_t i = 0; i < line.length(); i++) if (line[i] < 32 || line[i] > 126) line[i] = '?';
+    g_todo.push_back(line.substring(0, 60));
+    g_todoDone.push_back(done);
+  }
+  f.close();
+  if (g_todoSel >= (int)g_todo.size()) g_todoSel = max(0, (int)g_todo.size() - 1);
+}
+
+static void saveTodo() {
+  if (!g_fsReady) return;
+  File f = LittleFS.open("/todo.list", "w");
+  if (!f) return;
+  for (size_t i = 0; i < g_todo.size(); i++) {
+    f.print(g_todoDone[i] ? "x " : "- ");
+    f.print(g_todo[i]);
+    f.print("\n");
+  }
+  f.close();
+}
+
+// Buttons on the list. Returns true when it used the press.
+static bool todoPress(int pin) {
+  int count = (int)g_todo.size();
+  if (count == 0) return false;
+  if (pin == PIN_UP && g_todoSel > 0) { g_todoSel--; return true; }
+  if (pin == PIN_DOWN && g_todoSel < count - 1) { g_todoSel++; return true; }
+  if (pin == PIN_CLICK) {
+    g_todoDone[g_todoSel] = !g_todoDone[g_todoSel];
+    saveTodo();
+    return true;
+  }
+  return pin == PIN_UP || pin == PIN_DOWN;
+}
+
+static void drawTodo(bool asFace) {
+  int count = (int)g_todo.size(), left = 0;
+  for (int i = 0; i < count; i++) left += g_todoDone[i] ? 0 : 1;
+  String right = asFace ? clockText() : String("EXIT = back");
+  ClockNow now;
+  if (asFace && clockNow(now)) g_homeMinute = now.hour * 60 + now.minute;
+  drawHeader(count ? "TO-DO  " + String(left) + " of " + String(count) + " left" : String("TO-DO"), right);
+  g_canvas.setTextColor(1);
+  if (count == 0) {
+    drawSmallCentered("No list yet.", 50);
+    drawSmallCentered("Make one in the phone app: Files > To-do list", 66);
+    return;
+  }
+  if (g_todoSel < g_todoTop) g_todoTop = g_todoSel;
+  if (g_todoSel >= g_todoTop + TODO_ROWS) g_todoTop = g_todoSel - TODO_ROWS + 1;
+  g_canvas.setFont(&FreeSans9pt7b);
+  for (int row = 0; row < TODO_ROWS; row++) {
+    int idx = g_todoTop + row;
+    if (idx >= count) break;
+    int y = HEADER_H + row * TODO_ROW_H;
+    bool selected = idx == g_todoSel, done = g_todoDone[idx];
+    int ink = selected ? 0 : 1;
+    if (selected) g_canvas.fillRect(0, y, EPD_WIDTH, TODO_ROW_H, 1);
+    g_canvas.drawRect(5, y + 4, 10, 10, ink);                      // the tick box
+    if (done) {
+      g_canvas.drawLine(7, y + 9, 9, y + 11, ink);
+      g_canvas.drawLine(9, y + 11, 12, y + 6, ink);
+      g_canvas.drawLine(7, y + 10, 9, y + 12, ink);
+      g_canvas.drawLine(9, y + 12, 12, y + 7, ink);
+    }
+    String text = g_todo[idx];
+    while (text.length() > 1 && textWidth(text) > EPD_WIDTH - 26) text.remove(text.length() - 1);
+    g_canvas.setTextColor(ink);
+    g_canvas.setCursor(21, y + 13);
+    g_canvas.print(text);
+    if (done) {
+      if (!selected) {                                              // fade a finished item to grey
+        for (int py = y + 1; py < y + TODO_ROW_H - 1; py++)
+          for (int px = 20; px < EPD_WIDTH; px++)
+            if ((px + py) & 1) g_canvas.drawPixel(px, py, 0);
+      }
+      g_canvas.drawFastHLine(20, y + 9, min(textWidth(text) + 3, EPD_WIDTH - 22), ink);   // and strike it out
+    }
+  }
+  g_canvas.setFont(nullptr);
+  g_canvas.setTextColor(1);
+}
+
 // Expedition mode's home screen: the clock and nothing that needs the phone.
 static void drawExpeditionHome() {
   drawHeader("EXPEDITION MODE", "Bluetooth off");
@@ -1833,6 +1943,7 @@ static void drawExpeditionHome() {
 
 static void drawHome() {
   if (g_expedition) { drawExpeditionHome(); return; }
+  if (g_face == 7) { drawTodo(true); return; }
   ClockNow faceNow;
   if (g_face != 0 && clockNow(faceNow)) {
     static const char* const SHORT_DAYS[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
@@ -2457,7 +2568,7 @@ static void refreshFileList() {
   File root = LittleFS.open("/");
   for (File f = root.openNextFile(); f; f = root.openNextFile()) {
     String name = String(f.name());
-    if (!name.endsWith(".img")) g_fileNames.push_back(name);  // the photo face is not a note
+    if (!name.endsWith(".img") && !name.endsWith(".list")) g_fileNames.push_back(name);  // not notes
   }
   std::sort(g_fileNames.begin(), g_fileNames.end(),
             [](const String& a, const String& b) { return a.compareTo(b) < 0; });
@@ -2962,8 +3073,9 @@ static void serviceAppLink() {
   if (g_filesChanged) {
     g_filesChanged = false;
     refreshFileList();
+    loadTodo();
     g_photoTried = false;
-    if (g_screen == SCREEN_FILES) markDirty(200);
+    if (g_screen == SCREEN_FILES || g_screen == SCREEN_TODO || (g_screen == SCREEN_HOME && g_face == 7)) markDirty(200);
     if (g_screen == SCREEN_HOME && g_face == 5) {
       g_forceFull = true;
       markDirty(200);
@@ -3017,7 +3129,7 @@ int qrcodegen_getSize(const uint8_t qrcode[]);
 bool qrcodegen_getModule(const uint8_t qrcode[], int x, int y);
 }
 
-static const int TOOLS_COUNT = 13;
+static const int TOOLS_COUNT = 14;
 static const int GAMES_COUNT = 7;
 static int g_toolsSel = 0, g_toolsTop = 0, g_gamesSel = 0;
 
@@ -3115,7 +3227,7 @@ static bool isToolScreen() {
          g_screen == SCREEN_SNAKE || g_screen == SCREEN_2048 || g_screen == SCREEN_TOOLS || g_screen == SCREEN_TIMER || g_screen == SCREEN_STOPWATCH ||
          g_screen == SCREEN_REMOTE || g_screen == SCREEN_CARD || g_screen == SCREEN_ORACLE ||
          g_screen == SCREEN_DICE || g_screen == SCREEN_COIN || g_screen == SCREEN_WAYPOINTS ||
-         g_screen == SCREEN_WAYPOINT || g_screen == SCREEN_KNOTS;
+         g_screen == SCREEN_WAYPOINT || g_screen == SCREEN_KNOTS || g_screen == SCREEN_TODO;
 }
 
 static String clockFace(int seconds) {
@@ -3178,6 +3290,7 @@ static String toolsLabel(int i) {
     case 9: return "Morse code";
     case 10: return g_waypointCount ? "Waypoints (" + String(g_waypointCount) + ")" : String("Waypoints");
     case 11: return "Knots and lashings";
+    case 12: return "To-do list";
     default: return "Games";
   }
 }
@@ -3901,7 +4014,7 @@ static bool onToolPress(int pin) {
       static const Screen TARGETS[TOOLS_COUNT] = {
           SCREEN_TIMER, SCREEN_STOPWATCH, SCREEN_POMO, SCREEN_TALLY, SCREEN_TIP,  SCREEN_CONVERT,
           SCREEN_FIND,  SCREEN_REMOTE,    SCREEN_CARD, SCREEN_MORSE, SCREEN_WAYPOINTS, SCREEN_KNOTS,
-          SCREEN_GAMES};
+          SCREEN_TODO,  SCREEN_GAMES};
       g_screen = TARGETS[g_toolsSel];
       if (g_screen == SCREEN_WAYPOINTS) { g_wpSel = 0; g_wpNote = ""; }
       if (g_screen == SCREEN_KNOTS) findKnots();
@@ -3940,6 +4053,12 @@ static bool onToolPress(int pin) {
       g_wpArmed = false;
       g_screen = (pin == PIN_MENU) ? SCREEN_HOME : SCREEN_WAYPOINTS;
     }
+    return true;
+  }
+  if (g_screen == SCREEN_TODO) {
+    if (pin == PIN_EXIT) g_screen = SCREEN_TOOLS;
+    else if (pin == PIN_MENU) g_screen = SCREEN_HOME;
+    else todoPress(pin);
     return true;
   }
   if (g_screen == SCREEN_KNOTS) {
@@ -4295,6 +4414,7 @@ static void render() {
     case SCREEN_WAYPOINTS: drawWaypoints(); break;
     case SCREEN_WAYPOINT: drawWaypoint(); break;
     case SCREEN_KNOTS: drawKnots(); break;
+    case SCREEN_TODO: drawTodo(false); break;
     case SCREEN_MORSE: drawMorse(); break;
     case SCREEN_HANGMAN: drawHangman(); break;
     case SCREEN_MINES: drawMines(); break;
@@ -4714,6 +4834,9 @@ static void onPress(int pin) {
         g_screen = (pin == PIN_MENU) ? SCREEN_HOME : SCREEN_LIBRARY;
       }
     }
+  } else if (g_screen == SCREEN_HOME && g_face == 7 && !g_expedition && pin != PIN_MENU && pin != PIN_EXIT &&
+             todoPress(pin)) {
+    // the to-do face keeps the wheel for its own list
   } else if (g_screen == SCREEN_HOME) {
     if (pin == PIN_CLICK || pin == PIN_UP) g_screen = SCREEN_LIST;
     if (pin == PIN_DOWN) g_screen = SCREEN_MEDIA;
@@ -5072,6 +5195,7 @@ void setup() {
   g_layoutChanged = g_prefs.getUChar("gattv", 1) != GATT_LAYOUT;
   g_fsReady = LittleFS.begin(true, "/files", 8, "spiffs");  // formats the storage on first use
   Serial.printf("[app] file storage %s\n", g_fsReady ? "ready" : "NOT available");
+  loadTodo();
   g_timerSetSec = g_prefs.getInt("timerSec", 300);
   if (g_timerSetSec < 60 || g_timerSetSec > 180 * 60) g_timerSetSec = 300;
   g_timerLeftSec = g_timerSetSec;

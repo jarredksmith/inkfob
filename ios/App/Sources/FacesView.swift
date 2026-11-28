@@ -28,6 +28,7 @@ struct FacesView: View {
         ("Minimal", "Only the time"),
         ("Photo", "Your picture, with the time in the corner"),
         ("Custom", "Clock in the middle, your pick in each corner"),
+        ("To-do", "Your checklist, always up. Tick items off with the buttons"),
     ]
     static let cornerChoices = ["Nothing", "Date", "Weather", "Next event", "Steps", "Phone battery",
                                 "Unread count", "Countdown", "Stock or score", "Reminder"]
@@ -45,7 +46,7 @@ struct FacesView: View {
                 }
                 Section("Home screen face") {
                     ForEach(Array(Self.faces.enumerated()), id: \.offset) { index, face in
-                        if index < 6 || hasCustom {
+                        if index < 6 || (index == 6 && hasCustom) || (index == 7 && link.settings["todo"] != nil) {
                             Button {
                                 link.set("home", String(index))
                             } label: {
