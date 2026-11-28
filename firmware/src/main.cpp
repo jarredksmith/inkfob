@@ -104,7 +104,7 @@ struct PendingFetch {
   bool preexisting;  // was already on the phone before the pager connected
 };
 
-static const char* const FIRMWARE_VERSION = "v2.6";
+static const char* const FIRMWARE_VERSION = "v2.7";
 
 // One write to the phone's control point, carried out by the Bluetooth task.
 struct BleRequest {
@@ -234,6 +234,12 @@ static int g_menuSel = 0;
 static int g_group = 0;                 // which sub-menu is open: 0 Reading, 1 Phone
 static int g_groupSel[2] = {0, 0};
 static Screen g_backTo = SCREEN_TOOLS;  // where EXIT goes from a tool: the list it was opened from
+// What pushing the wheel up or down opens from the home screen.
+static const int SHORTCUT_COUNT = 13;
+static const char* const SHORTCUT_NAMES[SHORTCUT_COUNT] = {
+    "Notifications", "Now playing", "Today", "To-do list", "Timer", "Stopwatch", "Waypoints",
+    "Tools", "Survival library", "My files", "Camera remote", "My card", "Find my phone"};
+static uint8_t g_upApp = 0, g_downApp = 1;
 
 // Library browser: level 0 = books, 1 = sections of a book, 2 = entries of a section.
 static int g_libLevel = 0;
@@ -826,6 +832,8 @@ static String settingsText() {
   s += "read=" + String((int)g_readTurn) + "\n";
   s += "exped=" + String(g_expedition ? 1 : 0) + "\n";
   s += "todo=" + String((int)g_todo.size()) + "\n";
+  s += "up=" + String((int)g_upApp) + "\n";
+  s += "down=" + String((int)g_downApp) + "\n";
   s += "corners=";
   for (int i = 0; i < 4; i++) s += String((int)g_corners[i]);
   s += "\n";
@@ -2402,7 +2410,7 @@ static void drawDetail() {
   }
 }
 
-static const int SETTINGS_COUNT = 15;
+static const int SETTINGS_COUNT = 17;
 
 static String minutesLabel(int minutes) {
   if (minutes >= 60) return String(minutes / 60) + (minutes == 60 ? " hour" : " hours");
@@ -2434,8 +2442,10 @@ static String settingsLabel(int i) {
     case 9: return String("Controls: ") + (g_twoButton ? "Two buttons" : "Wheel");
     case 10: return String("Reading: ") + READ_NAMES[g_readTurn];
     case 11: return String("Expedition mode: ") + (g_expedition ? "On" : "Off");
-    case 12: return "Status";
-    case 13: return "Clear list";
+    case 12: return String("Up opens: ") + SHORTCUT_NAMES[g_upApp];
+    case 13: return String("Down opens: ") + SHORTCUT_NAMES[g_downApp];
+    case 14: return "Status";
+    case 15: return "Clear list";
     default: return "Forget phone";
   }
 }
@@ -3018,6 +3028,12 @@ static void applyAppSetting(const String& pair) {
   } else if (key == "btn2") {
     g_twoButton = number != 0;
     g_prefs.putBool("twoButton", g_twoButton);
+  } else if (key == "up" && number >= 0 && number < SHORTCUT_COUNT) {
+    g_upApp = (uint8_t)number;
+    g_prefs.putUChar("upApp", g_upApp);
+  } else if (key == "down" && number >= 0 && number < SHORTCUT_COUNT) {
+    g_downApp = (uint8_t)number;
+    g_prefs.putUChar("downApp", g_downApp);
   } else if (key == "exped") {
     setExpedition(number != 0);
   } else if (key == "read" && number >= 0 && number < 3) {
@@ -4653,9 +4669,17 @@ static void onSettingsSelect() {
       setExpedition(!g_expedition);
       break;
     case 12:
-      g_screen = SCREEN_STATUS;
+      g_upApp = (g_upApp + 1) % SHORTCUT_COUNT;
+      g_prefs.putUChar("upApp", g_upApp);
       break;
     case 13:
+      g_downApp = (g_downApp + 1) % SHORTCUT_COUNT;
+      g_prefs.putUChar("downApp", g_downApp);
+      break;
+    case 14:
+      g_screen = SCREEN_STATUS;
+      break;
+    case 15:
       g_notes.clear();
       g_sel = 0;
       g_listTop = 0;
@@ -4758,6 +4782,36 @@ static void onLibrarySelect() {
 static void openMainMenu() {
   g_screen = SCREEN_MENU;
   g_menuSel = 0;
+}
+
+// Opens one of the home-screen shortcuts. EXIT from it comes straight back home.
+static void openShortcut(int id) {
+  g_backTo = SCREEN_HOME;
+  switch (id) {
+    case 0: g_screen = SCREEN_LIST; break;
+    case 1: g_screen = SCREEN_MEDIA; break;
+    case 2: g_screen = SCREEN_TODAY; break;
+    case 3: g_screen = SCREEN_TODO; break;
+    case 4: g_screen = SCREEN_TIMER; break;
+    case 5: g_screen = SCREEN_STOPWATCH; break;
+    case 6:
+      g_wpSel = 0;
+      g_wpNote = "";
+      g_screen = SCREEN_WAYPOINTS;
+      break;
+    case 7: g_screen = SCREEN_TOOLS; break;
+    case 8: g_screen = SCREEN_LIBRARY; break;
+    case 9:
+      refreshFileList();
+      g_screen = SCREEN_FILES;
+      break;
+    case 10: g_screen = SCREEN_REMOTE; break;
+    case 11: g_screen = SCREEN_CARD; break;
+    default:
+      g_findSent = false;
+      g_screen = SCREEN_FIND;
+      break;
+  }
 }
 
 static void onPress(int pin) {
@@ -4883,8 +4937,9 @@ static void onPress(int pin) {
              todoPress(pin)) {
     // the to-do face keeps the wheel for its own list
   } else if (g_screen == SCREEN_HOME) {
-    if (pin == PIN_CLICK || pin == PIN_UP) g_screen = SCREEN_LIST;
-    if (pin == PIN_DOWN) g_screen = SCREEN_MEDIA;
+    if (pin == PIN_CLICK) g_screen = SCREEN_LIST;
+    if (pin == PIN_UP) openShortcut(g_upApp);
+    if (pin == PIN_DOWN) openShortcut(g_downApp);
     if (pin == PIN_MENU) openMainMenu();
     if (pin == PIN_EXIT) g_forceFull = true;  // clean up any ghosting
   } else if (g_screen == SCREEN_MEDIA) {
@@ -5209,6 +5264,8 @@ void setup() {
   g_flip = g_prefs.getBool("flip", false);
   g_readTurn = g_prefs.getUChar("readTurn", 0) % 3;
   g_expedition = g_prefs.getBool("exped", false);
+  g_upApp = g_prefs.getUChar("upApp", 0) % SHORTCUT_COUNT;
+  g_downApp = g_prefs.getUChar("downApp", 1) % SHORTCUT_COUNT;
   loadWaypoints();
   g_fastRefresh = g_prefs.getBool("fast", true);
   g_mirror = g_prefs.getBool("mirror", true);

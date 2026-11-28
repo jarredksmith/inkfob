@@ -8,6 +8,8 @@ struct PagerSettingsView: View {
     @State private var qr = ""
 
     private static let sleepChoices = ["Never", "1 minute", "5 minutes", "15 minutes", "30 minutes", "1 hour"]
+    private static let shortcuts = ["Notifications", "Now playing", "Today", "To-do list", "Timer", "Stopwatch", "Waypoints",
+                                    "Tools", "Survival library", "My files", "Camera remote", "My card", "Find my phone"]
     private static let popupChoices = ["Until I dismiss it", "10 seconds", "30 seconds", "1 minute", "5 minutes"]
     private static let checkChoices = ["Off", "Every 5 minutes", "Every 15 minutes", "Every 30 minutes", "Every hour"]
 
@@ -21,6 +23,20 @@ struct PagerSettingsView: View {
                     Toggle("Small text", isOn: flag("small"))
                     Toggle("Flip screen", isOn: flag("flip"))
                     Toggle("Fast refresh", isOn: flag("fast"))
+                }
+                if link.settings["up"] != nil {
+                    Section {
+                        Picker("Up opens", selection: choice("up")) {
+                            ForEach(Array(Self.shortcuts.enumerated()), id: \.offset) { index, label in Text(label).tag(index) }
+                        }
+                        Picker("Down opens", selection: choice("down")) {
+                            ForEach(Array(Self.shortcuts.enumerated()), id: \.offset) { index, label in Text(label).tag(index) }
+                        }
+                    } header: {
+                        Text("Home screen shortcuts")
+                    } footer: {
+                        Text("What opens when you push the wheel up or down from the home screen (or tap the top or bottom button in two-button mode). Pressing select still opens notifications, and EXIT brings you back home. On the To-do face the wheel moves through the list instead.")
+                    }
                 }
                 if link.settings["btn2"] != nil {
                     Section {
