@@ -104,7 +104,7 @@ struct PendingFetch {
   bool preexisting;  // was already on the phone before the pager connected
 };
 
-static const char* const FIRMWARE_VERSION = "v2.5";
+static const char* const FIRMWARE_VERSION = "v2.6";
 
 // One write to the phone's control point, carried out by the Bluetooth task.
 struct BleRequest {
@@ -210,7 +210,8 @@ enum Screen {
   SCREEN_WAYPOINTS,
   SCREEN_WAYPOINT,
   SCREEN_KNOTS,
-  SCREEN_TODO
+  SCREEN_TODO,
+  SCREEN_GROUP
 };
 static Screen g_screen = SCREEN_HOME;
 
@@ -230,6 +231,9 @@ static bool g_mediaSkipMode = false;  // rocker skips tracks instead of changing
 
 static Screen g_detailReturn = SCREEN_LIST;  // where EXIT goes from an opened notification
 static int g_menuSel = 0;
+static int g_group = 0;                 // which sub-menu is open: 0 Reading, 1 Phone
+static int g_groupSel[2] = {0, 0};
+static Screen g_backTo = SCREEN_TOOLS;  // where EXIT goes from a tool: the list it was opened from
 
 // Library browser: level 0 = books, 1 = sections of a book, 2 = entries of a section.
 static int g_libLevel = 0;
@@ -2159,14 +2163,32 @@ static String mainMenuLabel(int i) {
       int unread = unreadCount();
       return unread ? "Notifications (" + String(unread) + " new)" : String("Notifications");
     }
-    case 1: return "Library";
-    case 2: return "Now Playing";
-    case 3: return "Tools";
-    case 4: return "Settings";
-    case 5: return "My files";
-    case 6: return "Today";
-    default: return "Sleep now";
+    case 1: return "Today";
+    case 2: {
+      int left = 0;
+      for (size_t k = 0; k < g_todo.size(); k++) left += g_todoDone[k] ? 0 : 1;
+      return left ? "To-do list (" + String(left) + " left)" : String("To-do list");
+    }
+    case 3: return "Reading  >";
+    case 4: return "Phone  >";
+    case 5: return "Tools  >";
+    case 6: return "Sleep now";
+    default: return "Settings";
   }
+}
+
+static const int GROUP_COUNTS[2] = {3, 4};
+
+static String groupLabel(int i) {
+  static const char* const NAMES[2][4] = {
+      {"Survival library", "My files", "Knots and lashings", ""},
+      {"Now playing", "Find my phone", "Camera remote", "My card (QR code)"}};
+  return NAMES[g_group][i];
+}
+
+static void drawGroup() {
+  drawHeader(g_group == 0 ? "READING" : "PHONE", "EXIT = back");
+  drawRows(GROUP_COUNTS[g_group], g_groupSel[g_group], 0, groupLabel);
 }
 
 static void drawMainMenu() {
@@ -3129,7 +3151,7 @@ int qrcodegen_getSize(const uint8_t qrcode[]);
 bool qrcodegen_getModule(const uint8_t qrcode[], int x, int y);
 }
 
-static const int TOOLS_COUNT = 14;
+static const int TOOLS_COUNT = 9;
 static const int GAMES_COUNT = 7;
 static int g_toolsSel = 0, g_toolsTop = 0, g_gamesSel = 0;
 
@@ -3284,14 +3306,9 @@ static String toolsLabel(int i) {
     case 3: return "Tally counter";
     case 4: return "Tip and split";
     case 5: return "Converter";
-    case 6: return "Find my phone";
-    case 7: return "Camera remote";
-    case 8: return "My card (QR code)";
-    case 9: return "Morse code";
-    case 10: return g_waypointCount ? "Waypoints (" + String(g_waypointCount) + ")" : String("Waypoints");
-    case 11: return "Knots and lashings";
-    case 12: return "To-do list";
-    default: return "Games";
+    case 6: return "Morse code";
+    case 7: return g_waypointCount ? "Waypoints (" + String(g_waypointCount) + ")" : String("Waypoints");
+    default: return "Games  >";
   }
 }
 
@@ -4004,20 +4021,18 @@ static bool onToolPress(int pin) {
   if (g_screen == SCREEN_TOOLS) {
     if (pin == PIN_UP && g_toolsSel > 0) g_toolsSel--;
     if (pin == PIN_DOWN && g_toolsSel < TOOLS_COUNT - 1) g_toolsSel++;
-    if (pin == PIN_CLICK && g_toolsSel == 6) g_findSent = false;
     if (pin == PIN_EXIT) {
       openMainMenu();
-      g_menuSel = 3;
+      g_menuSel = 5;
     }
     if (pin == PIN_MENU) g_screen = SCREEN_HOME;
     if (pin == PIN_CLICK) {
       static const Screen TARGETS[TOOLS_COUNT] = {
-          SCREEN_TIMER, SCREEN_STOPWATCH, SCREEN_POMO, SCREEN_TALLY, SCREEN_TIP,  SCREEN_CONVERT,
-          SCREEN_FIND,  SCREEN_REMOTE,    SCREEN_CARD, SCREEN_MORSE, SCREEN_WAYPOINTS, SCREEN_KNOTS,
-          SCREEN_TODO,  SCREEN_GAMES};
+          SCREEN_TIMER, SCREEN_STOPWATCH, SCREEN_POMO,      SCREEN_TALLY, SCREEN_TIP,
+          SCREEN_CONVERT, SCREEN_MORSE,   SCREEN_WAYPOINTS, SCREEN_GAMES};
       g_screen = TARGETS[g_toolsSel];
+      g_backTo = SCREEN_TOOLS;
       if (g_screen == SCREEN_WAYPOINTS) { g_wpSel = 0; g_wpNote = ""; }
-      if (g_screen == SCREEN_KNOTS) findKnots();
     }
     return true;
   }
@@ -4026,7 +4041,7 @@ static bool onToolPress(int pin) {
     g_wpNote = "";
     if (pin == PIN_UP && g_wpSel > 0) g_wpSel--;
     if (pin == PIN_DOWN && g_wpSel < rows - 1) g_wpSel++;
-    if (pin == PIN_EXIT) g_screen = SCREEN_TOOLS;
+    if (pin == PIN_EXIT) g_screen = g_backTo;
     if (pin == PIN_MENU) g_screen = SCREEN_HOME;
     if (pin == PIN_CLICK) {
       if (g_wpSel == 0) {
@@ -4056,7 +4071,7 @@ static bool onToolPress(int pin) {
     return true;
   }
   if (g_screen == SCREEN_TODO) {
-    if (pin == PIN_EXIT) g_screen = SCREEN_TOOLS;
+    if (pin == PIN_EXIT) g_screen = g_backTo;
     else if (pin == PIN_MENU) g_screen = SCREEN_HOME;
     else todoPress(pin);
     return true;
@@ -4064,7 +4079,7 @@ static bool onToolPress(int pin) {
   if (g_screen == SCREEN_KNOTS) {
     if (pin == PIN_UP && g_knotSel > 0) g_knotSel--;
     if (pin == PIN_DOWN && g_knotSel < g_knotCount - 1) g_knotSel++;
-    if (pin == PIN_EXIT) g_screen = SCREEN_TOOLS;
+    if (pin == PIN_EXIT) g_screen = g_backTo;
     if (pin == PIN_MENU) g_screen = SCREEN_HOME;
     if (pin == PIN_CLICK && g_knotCount > 0) {
       openReader(g_knotItems[g_knotSel], 0);
@@ -4088,7 +4103,7 @@ static bool onToolPress(int pin) {
   if (pin == PIN_EXIT && !(g_screen == SCREEN_TIMER && g_timerDone)) {
     if (g_screen == SCREEN_SNAKE && g_snAlive) g_snPaused = true;
     if (g_screen == SCREEN_TALLY) g_prefs.putInt("tally", g_tally);
-    g_screen = isGameScreen() ? SCREEN_GAMES : SCREEN_TOOLS;
+    g_screen = isGameScreen() ? SCREEN_GAMES : g_backTo;
     g_forceFull = true;
     return true;
   }
@@ -4281,7 +4296,7 @@ static bool onToolPress(int pin) {
     if (sendHidKey(key)) blinkLed(1);
     return false;  // nothing on the screen changes
   } else if (g_screen == SCREEN_CARD) {
-    g_screen = SCREEN_TOOLS;
+    g_screen = g_backTo;
   } else if (g_screen == SCREEN_ORACLE) {
     if (pin == PIN_CLICK) {
       g_oracleAnswer = (int)(esp_random() % ORACLE_COUNT);
@@ -4415,6 +4430,7 @@ static void render() {
     case SCREEN_WAYPOINT: drawWaypoint(); break;
     case SCREEN_KNOTS: drawKnots(); break;
     case SCREEN_TODO: drawTodo(false); break;
+    case SCREEN_GROUP: drawGroup(); break;
     case SCREEN_MORSE: drawMorse(); break;
     case SCREEN_HANGMAN: drawHangman(); break;
     case SCREEN_MINES: drawMines(); break;
@@ -4748,7 +4764,7 @@ static void onPress(int pin) {
   if (g_screen == SCREEN_TODAY) {
     if (pin == PIN_MENU) {
       openMainMenu();
-      g_menuSel = 6;
+      g_menuSel = 1;
     } else {
       g_screen = SCREEN_HOME;
     }
@@ -4771,21 +4787,50 @@ static void onPress(int pin) {
     if (pin == PIN_EXIT || pin == PIN_MENU) g_screen = SCREEN_HOME;
     if (pin == PIN_CLICK) {
       if (g_menuSel == 0) g_screen = SCREEN_LIST;
-      if (g_menuSel == 1) g_screen = SCREEN_LIBRARY;
-      if (g_menuSel == 2) g_screen = SCREEN_MEDIA;
-      if (g_menuSel == 3) g_screen = SCREEN_TOOLS;
-      if (g_menuSel == 4) {
+      if (g_menuSel == 1) g_screen = SCREEN_TODAY;
+      if (g_menuSel == 2) {
+        g_screen = SCREEN_TODO;
+        g_backTo = SCREEN_MENU;
+      }
+      if (g_menuSel == 3 || g_menuSel == 4) {
+        g_group = g_menuSel - 3;
+        g_screen = SCREEN_GROUP;
+      }
+      if (g_menuSel == 5) g_screen = SCREEN_TOOLS;
+      if (g_menuSel == 6) {
+        g_screen = SCREEN_HOME;
+        enterSleep(true);  // does not return
+      }
+      if (g_menuSel == 7) {
         g_screen = SCREEN_SETTINGS;
         g_settingsSel = 0;
       }
-      if (g_menuSel == 5) {
-        refreshFileList();
-        g_screen = SCREEN_FILES;
-      }
-      if (g_menuSel == 6) g_screen = SCREEN_TODAY;
-      if (g_menuSel == 7) {
-        g_screen = SCREEN_HOME;
-        enterSleep(true);  // does not return
+    }
+  } else if (g_screen == SCREEN_GROUP) {
+    int& sel = g_groupSel[g_group];
+    if (pin == PIN_UP && sel > 0) sel--;
+    if (pin == PIN_DOWN && sel < GROUP_COUNTS[g_group] - 1) sel++;
+    if (pin == PIN_MENU) g_screen = SCREEN_HOME;
+    if (pin == PIN_EXIT) {
+      openMainMenu();
+      g_menuSel = 3 + g_group;
+    }
+    if (pin == PIN_CLICK) {
+      g_backTo = SCREEN_GROUP;
+      if (g_group == 0) {
+        if (sel == 0) g_screen = SCREEN_LIBRARY;
+        if (sel == 1) {
+          refreshFileList();
+          g_screen = SCREEN_FILES;
+        }
+        if (sel == 2) {
+          findKnots();
+          g_screen = SCREEN_KNOTS;
+        }
+      } else {
+        static const Screen TARGETS[4] = {SCREEN_MEDIA, SCREEN_FIND, SCREEN_REMOTE, SCREEN_CARD};
+        g_screen = TARGETS[sel];
+        if (g_screen == SCREEN_FIND) g_findSent = false;
       }
     }
   } else if (g_screen == SCREEN_LIBRARY) {
@@ -4799,8 +4844,8 @@ static void onPress(int pin) {
       if (g_libLevel > 0) {
         g_libLevel--;
       } else {
-        openMainMenu();
-        g_menuSel = 1;
+        g_group = 0;
+        g_screen = SCREEN_GROUP;
       }
     }
   } else if (g_screen == SCREEN_READER) {
@@ -4882,9 +4927,10 @@ static void onPress(int pin) {
         g_screen = SCREEN_NOTE;
       }
     }
-    if (pin == PIN_MENU || pin == PIN_EXIT) {
-      openMainMenu();
-      g_menuSel = 5;
+    if (pin == PIN_MENU) openMainMenu();
+    if (pin == PIN_EXIT) {
+      g_group = 0;
+      g_screen = SCREEN_GROUP;
     }
   } else if (g_screen == SCREEN_NOTE) {
     int pages = (int)g_notePages.size();
@@ -5319,7 +5365,7 @@ void loop() {
     idleWait(40);
     return;
   }
-  g_repeatOk = !g_dirty && (g_screen == SCREEN_MENU || g_screen == SCREEN_LIST ||
+  g_repeatOk = !g_dirty && (g_screen == SCREEN_MENU || g_screen == SCREEN_LIST || g_screen == SCREEN_GROUP ||
                             g_screen == SCREEN_LIBRARY || g_screen == SCREEN_SETTINGS ||
                             g_screen == SCREEN_TOOLS || g_screen == SCREEN_FILES ||
                             g_screen == SCREEN_GAMES || g_screen == SCREEN_TIP ||

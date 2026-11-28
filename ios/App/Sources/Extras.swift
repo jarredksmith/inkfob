@@ -273,7 +273,7 @@ struct ExtrasView: View {
 
             Section {
                 if ringer.notificationsAllowed {
-                    Label("Ready. On the pager: Tools > Find my phone.", systemImage: "checkmark.circle")
+                    Label("Ready. On the pager: Menu > Phone > Find my phone.", systemImage: "checkmark.circle")
                 } else {
                     Button("Allow notifications for Find my phone") { ringer.askPermission() }
                 }

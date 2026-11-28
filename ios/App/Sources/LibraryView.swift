@@ -211,7 +211,7 @@ struct LibraryView: View {
                 message = "Sending \(book.title)..."
                 let tail = note
                 link.sendFile(name: String(book.title.prefix(27)) + ".txt", text: text) { ok, result in
-                    message = ok ? "Sent. Find it on the pager under Menu > My files.\(tail)" : result
+                    message = ok ? "Sent. Find it on the pager under Menu > Reading > My files.\(tail)" : result
                 }
             }
         }

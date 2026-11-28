@@ -96,7 +96,7 @@ struct PagerSettingsView: View {
                 } header: {
                     Text("My card")
                 } footer: {
-                    Text("Shown under Tools > My card, and on the sleep screen if you choose it.")
+                    Text("Shown under Menu > Phone > My card, and on the sleep screen if you choose it.")
                 }
             }
             .disabled(!link.isReady)

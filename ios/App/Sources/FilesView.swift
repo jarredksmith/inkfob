@@ -28,7 +28,7 @@ struct FilesView: View {
                     Button { makingTodo = true } label: { Label("To-do list", systemImage: "checklist") }
                     NavigationLink { LibraryView() } label: { Label("Get a free book", systemImage: "books.vertical") }
                 } footer: {
-                    Text("Plain text (.txt) works best. Files appear on the pager under Menu > My files. Flashcard decks open as cards.")
+                    Text("Plain text (.txt) works best. Files appear on the pager under Menu > Reading > My files. Flashcard decks open as cards.")
                 }
                 .disabled(!link.isReady || link.transferActive)
                 Section("On the pager") {
@@ -126,7 +126,7 @@ struct TodoEditor: View {
                 } header: {
                     Text("Items")
                 } footer: {
-                    Text("One item per line, up to 40. \(items.count) so far. On the pager it is under Tools > To-do list, or pick the To-do face on the Faces tab to keep it on the home screen. Scroll to an item and press select to tick it; ticked items turn grey with a line through them. Sending again replaces the list and clears the ticks.")
+                    Text("One item per line, up to 40. \(items.count) so far. On the pager it is under Menu > To-do list, or pick the To-do face on the Faces tab to keep it on the home screen. Scroll to an item and press select to tick it; ticked items turn grey with a line through them. Sending again replaces the list and clears the ticks.")
                 }
             }
             .navigationTitle("To-do list")
